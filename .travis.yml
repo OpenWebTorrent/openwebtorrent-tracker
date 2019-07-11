@@ -1,5 +1,7 @@
 language: node_js
 sudo: false
+services:
+  - xvfb
 node_js:
   - lts/*
 before_script:
