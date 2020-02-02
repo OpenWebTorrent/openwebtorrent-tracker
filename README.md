@@ -1,6 +1,6 @@
 # OpenWebtorrent Tracker
 
-*OpenWebtorrent Tracker* is a webtorrent tracker written in C++.
+Fast and simple webtorrent tracker written in C++.
 
 ## Requirements
 - C++ 17
@@ -22,13 +22,13 @@ sudo apt-get install zlib1g-dev
 
 ## Usage
 
-First build the project:
+First, build the project:
 
 ```sh
 make build
 ```
 
-Then you can run it;
+Then, you can run it;
 
 ```sh
 ./build/openwebtorrent-tracker \
