@@ -1,0 +1,5 @@
+# Build directories
+build/
+
+# No private keys
+*.pem

@@ -1,0 +1,6 @@
+[submodule "deps/uWebSockets"]
+	path = deps/uWebSockets
+	url = https://github.com/uNetworking/uWebSockets.git
+[submodule "deps/json"]
+	path = deps/json
+	url = https://github.com/nlohmann/json.git
