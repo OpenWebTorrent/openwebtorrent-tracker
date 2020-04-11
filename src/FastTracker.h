@@ -189,7 +189,7 @@ private:
 
 		swarm->removePeer(peer);
 
-		peer->infoHashes.erase(infoHash)
+		peer->infoHashes.erase(infoHash);
 
 		if (swarm->getPeersCount() == 0) {
 			this->swarms.erase(infoHash);

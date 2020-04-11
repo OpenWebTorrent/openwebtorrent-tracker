@@ -9,9 +9,9 @@ Fast and simple webtorrent tracker written in C++.
 
 ```sh
 # Install OpenSSL (1.1.1)
-wget https://www.openssl.org/source/openssl-1.1.1.tar.gz
-tar xvf openssl-1.1.1.tar.gz
-cd openssl-1.1.1
+wget https://www.openssl.org/source/openssl-1.1.1f.tar.gz
+tar xvf openssl-1.1.1f.tar.gz
+cd openssl-1.1.1f
 ./config
 make
 make install

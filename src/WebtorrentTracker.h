@@ -15,6 +15,7 @@
 #include "Tracker.h"
 #include "FastTracker.h"
 #include "DataObject.h"
+#include "PeerContext.h"
 
 using namespace nlohmann;
 
@@ -67,7 +68,7 @@ public:
 			.compression = uWS::SHARED_COMPRESSOR,
 			.maxPayloadLength = 64 * 1024,
 			.idleTimeout = 240,
-			.maxBackpressure = 1 * 1024 * 1204,
+			//.maxBackpressure = 1 * 1024 * 1204,
 			/* Handlers */
 			.open = [this](auto* ws, auto* req) {
 				this->onOpen(ws, req);
