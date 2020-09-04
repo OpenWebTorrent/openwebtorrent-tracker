@@ -134,7 +134,7 @@ public:
 
 private:
 
-	void onOpen(auto* ws, auto* req) {
+	void onOpen(uWS::WebSocket<true, true>* ws, uWS::HttpRequest* req) {
 		DOUT("CONNECTED");
 
 		this->websocketCount++;
@@ -144,7 +144,7 @@ private:
 		peer->ws = ws;
 	}
 
-	void onMessage(auto* ws, std::string_view message, uWS::OpCode opCode) {
+	void onMessage(uWS::WebSocket<true, true>* ws, std::string_view message, uWS::OpCode opCode) {
 		DOUT("Received:");
 		DOUT(message);
 
@@ -166,7 +166,7 @@ private:
 		}
 	}
 
-	void onClose(auto* ws, int code, std::string_view message) {
+	void onClose(uWS::WebSocket<true, true>* ws, int code, std::string_view message) {
 		DOUT("DISCONNECTED");
 
 		this->websocketCount--;

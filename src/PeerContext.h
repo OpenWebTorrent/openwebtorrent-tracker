@@ -25,7 +25,7 @@ public:
 		this->id = "";
 	}
 
-	PeerContext(auto* ws, std::string id = "") {
+	PeerContext(uWS::WebSocket<true, true>* ws, std::string id = "") {
 		this->ws = ws;
 		this->id = id;
 	}
