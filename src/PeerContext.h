@@ -3,8 +3,8 @@
 
 #include <set>
 #include <string>
-#include <json.hpp>
 #include <App.h>
+#include <json.hpp>
 
 #include "Utils.h"
 
@@ -15,9 +15,7 @@ namespace owt {
 class PeerContext {
 public:
 	uWS::WebSocket<true, true>* ws;
-
 	std::string id;
-
 	std::set<std::string> infoHashes;
 
 	PeerContext() {
@@ -32,8 +30,6 @@ public:
 
 	~PeerContext() {
 		this->ws = NULL;
-		this->id.clear();
-		this->infoHashes.clear();
 	}
 
 	uWS::WebSocket<true, true>* getWebsocket() {
@@ -48,7 +44,7 @@ public:
 		return this->infoHashes;
 	}
 
-	void setWebsocket(uWS::WebSocket<true, true>* ws) {
+	void setWebsocket(auto* ws) {
 		this->ws = ws;
 	}
 

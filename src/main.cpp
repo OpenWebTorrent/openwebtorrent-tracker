@@ -1,3 +1,6 @@
+#include <exception>
+#include <iostream>
+
 #include "Utils.h"
 #include "WebtorrentTracker.h"
 
@@ -8,5 +11,10 @@ int main() {
 
 	owt::WebtorrentTracker tracker(8000, "./localhost-key.pem", "./localhost.pem");
 	//owt::WebtorrentTracker tracker(8000);
-	tracker.run();
+
+	try {
+		tracker.run();
+	} catch (std::runtime_error e) {
+		std::cout << "Error: " << e.what() << std::endl;
+	}
 }

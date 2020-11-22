@@ -2,13 +2,14 @@
 #define OWT_WEBTORRENT_TRACKER_H
 
 #include <exception>
-#include <string>
 #include <iostream>
+#include <string>
 #include <vector>
 #include <json.hpp>
 #include <App.h>
-#include <sys/time.h>
 #include <sys/resource.h>
+#include <sys/time.h>
+#include <sys/stat.h>
 
 #include "Utils.h"
 #include "Swarm.h"
@@ -60,6 +61,12 @@ public:
 		// TODO: add threads
 		// TODO: add non-ssl app
 
+		// Check if files exists
+		bool exists = this->fileExists(this->key_file) && this->fileExists(this->cert_file);
+		if (!exists) {
+			throw std::runtime_error("Cert and key must exists");
+		}
+
 		uWS::SSLApp({
 			.key_file_name = this->key_file.c_str(),
 			.cert_file_name = this->cert_file.c_str()
@@ -96,6 +103,7 @@ public:
 				peersCount += swarm->getPeersCount();
 			}
 
+			// Server stats
 			std::vector<owt::ServerStats> currentStats = {
 				{
 					std::string(this->host + ":") + std::to_string(this->port),
@@ -175,6 +183,11 @@ private:
 		if (!peer->id.empty()) {
 			this->tracker->disconnectPeer(peer);
 		}
+	}
+
+	bool fileExists(const std::string& filename) {
+		struct stat buffer;
+		return (stat (filename.c_str(), &buffer) == 0);
 	}
 
 };

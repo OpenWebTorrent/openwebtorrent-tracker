@@ -13,7 +13,10 @@ namespace owt {
 	};
 
 	static void to_json(json& j, const ServerStats& value) {
-		j = json{{"server", value.server}, {"websocketCount", value.websocketCount}};
+		j = json{
+			{"server", value.server},
+			{"websocketCount", value.websocketCount}
+		};
 	}
 
 	static void from_json(const json& j, ServerStats& value) {
