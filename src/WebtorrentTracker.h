@@ -28,30 +28,30 @@ private:
 	int port;
 	std::string host;
 
-	std::string key_file;
-	std::string cert_file;
+	std::string keyFile;
+	std::string certFile;
 
 	int websocketCount;
 	Tracker* tracker;
 
 public:
 
-	WebtorrentTracker(int port, std::string host, std::string key_file, std::string cert_file) {
+	WebtorrentTracker(int port, std::string host, std::string keyFile, std::string certFile) {
 		// Settings
 		this->port = port;
 		this->host = host;
 
-		this->key_file = key_file;
-		this->cert_file = cert_file;
+		this->keyFile = keyFile;
+		this->certFile = certFile;
 
 		// Initialize
 		this->websocketCount = 0;
 		this->tracker = new FastTracker();
 	}
 
-	WebtorrentTracker(int port, std::string key_file, std::string cert_file) : WebtorrentTracker(port, "0.0.0.0", key_file, cert_file) {}
+	WebtorrentTracker(int port, std::string keyFile, std::string certFile) : WebtorrentTracker(port, "0.0.0.0", keyFile, certFile) {}
 
-	WebtorrentTracker(std::string host, std::string key_file, std::string cert_file) : WebtorrentTracker(0, host, key_file, cert_file) {}
+	WebtorrentTracker(std::string host, std::string keyFile, std::string certFile) : WebtorrentTracker(0, host, keyFile, certFile) {}
 
 	WebtorrentTracker(int port) : WebtorrentTracker(port, "0.0.0.0", "", "") {}
 
@@ -62,35 +62,37 @@ public:
 		// TODO: add non-ssl app
 
 		// Check if files exists
-		bool exists = this->fileExists(this->key_file) && this->fileExists(this->cert_file);
+		bool exists = this->fileExists(this->keyFile) && this->fileExists(this->certFile);
 		if (!exists) {
 			throw std::runtime_error("Cert and key must exists");
 		}
 
 		uWS::SSLApp({
-			.key_file_name = this->key_file.c_str(),
-			.cert_file_name = this->cert_file.c_str()
-		}).ws<PeerContext>("/*", {
+			.key_file_name = this->keyFile.c_str(),
+			.cert_file_name = this->certFile.c_str()
+		})
+		.ws<PeerContext>("/*", {
 			/* Settings */
 			.compression = uWS::SHARED_COMPRESSOR,
 			.maxPayloadLength = 64 * 1024,
 			.idleTimeout = 240,
-			//.maxBackpressure = 1 * 1024 * 1204,
+			.maxBackpressure = 1 * 1024 * 1204,
 			/* Handlers */
-			.open = [this](auto* ws, auto* req) {
-				this->onOpen(ws, req);
+			.upgrade = nullptr,
+			.open = [this](auto* ws) {
+				this->onOpen(ws);
 			},
 			.message = [this](auto* ws, std::string_view message, uWS::OpCode opCode) {
 				this->onMessage(ws, message, opCode);
 			},
 			.drain = [](auto* ws) {
-				/* Check getBufferedAmount here */
+				// Check ws->getBufferedAmount() here
 			},
 			.ping = [](auto *ws) {
-				/* Not implemented yet */
+				// Not implemented yet
 			},
 			.pong = [](auto *ws) {
-				/* Not implemented yet */
+				// Not implemented yet
 			},
 			.close = [this](auto* ws, int code, std::string_view message) {
 				this->onClose(ws, code, message);
@@ -142,13 +144,13 @@ public:
 
 private:
 
-	void onOpen(auto* ws, auto* req) {
+	void onOpen(auto* ws) {
 		DOUT("CONNECTED");
 
 		this->websocketCount++;
 
 		// Intiialze peer context
-		PeerContext* peer = (PeerContext*) ws->getUserData();
+		PeerContext* peer = static_cast<PeerContext*>(ws->getUserData());
 		peer->ws = ws;
 	}
 
@@ -166,7 +168,7 @@ private:
 		}
 
 		try {
-			PeerContext* peerContext = (PeerContext*) ws->getUserData();
+			PeerContext* peerContext = static_cast<PeerContext*>(ws->getUserData());
 			this->tracker->processMessage(data, peerContext);
 		} catch (TrackerException& e) {
 			EOUT("Error: " << e.what());
@@ -179,7 +181,7 @@ private:
 
 		this->websocketCount--;
 
-		PeerContext* peer = (PeerContext*) ws->getUserData();
+		PeerContext* peer = static_cast<PeerContext*>(ws->getUserData());
 		if (!peer->id.empty()) {
 			this->tracker->disconnectPeer(peer);
 		}
@@ -195,3 +197,4 @@ private:
 };
 
 #endif // OWT_WEBTORRENT_TRACKER_H
+
