@@ -143,7 +143,7 @@ public:
 	}
 
 private:
-  
+
 	void onOpen(uWS::WebSocket<true, true>* ws) {
 		DOUT("CONNECTED");
 
