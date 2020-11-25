@@ -1,7 +1,6 @@
 include(FindPackageHandleStandardArgs)
 
 # Dependencies
-#find_package(OpenSSL REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(uSockets REQUIRED)
 
@@ -27,12 +26,10 @@ SET_TARGET_PROPERTIES(uWebSockets PROPERTIES LINKER_LANGUAGE CXX)
 # Include and link
 TARGET_INCLUDE_DIRECTORIES(uWebSockets PUBLIC
 	${UWEBSOCKETS_INCLUDE_DIR}/uWebSockets/src
-#	${OPENSSL_INCLUDE_DIR}
 	${ZLIB_INCLUDE_DIRS}
 	${USOCKETS_INCLUDE_DIR}
 )
-TARGET_LINK_LIBRARIES(uWebSockets
-#	${OPENSSL_LIBRARIES}
+TARGET_LINK_LIBRARIES(uWebSockets PUBLIC
 	${ZLIB_LIBRARIES}
 	${USOCKETS_LIBRARIES}
 )
@@ -40,15 +37,6 @@ TARGET_LINK_LIBRARIES(uWebSockets
 # Vars
 SET(UWEBSOCKETS_INCLUDE_DIR ${UWEBSOCKETS_INCLUDE_DIR}/uWebSockets/src)
 SET(UWEBSOCKETS_LIBRARIES uWebSockets)
-
-#find_library(
-#	UWEBSOCKETS_LIBRARIES
-#	NAMES uWS
-#	PATHS
-#	${CMAKE_PREFIX_PATH}
-#	PATH_SUFFIXES
-#	uWebSockets
-#)
 
 find_package_handle_standard_args(
 	uWebSockets
@@ -61,4 +49,3 @@ mark_as_advanced(
 	UWEBSOCKETS_INCLUDE_DIR
 	UWEBSOCKETS_LIBRARIES
 )
-

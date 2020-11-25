@@ -5,9 +5,9 @@ CMAKE_MINIMUM_REQUIRED(VERSION 3.5.1)
 PROJECT(openwebtorrent-tracker)
 
 # Add a compiler flag
-SET(CMAKE_CC_COMPILER /usr/bin/gcc-7)
-SET(CMAKE_CXX_COMPILER /usr/bin/g++-7)
-SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -g")
+SET(CMAKE_CC_COMPILER /usr/bin/gcc-8)
+SET(CMAKE_CXX_COMPILER /usr/bin/g++-8)
+SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -DLIBUS_USE_OPENSSL -lssl -lcrypto -lstdc++")
 
 # Dependencies
 SET(CMAKE_INCLUDE_CURRENT_DIR ON)

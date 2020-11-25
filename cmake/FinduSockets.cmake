@@ -1,6 +1,9 @@
 include(FindPackageHandleStandardArgs)
 
+# Dependencies
 find_package(OpenSSL REQUIRED)
+
+add_definitions(-DLIBUS_USE_OPENSSL)
 
 # Get include dir
 find_path(
@@ -26,7 +29,7 @@ TARGET_INCLUDE_DIRECTORIES(uSockets PUBLIC
 	${USOCKETS_INCLUDE_DIR}/uWebSockets/uSockets/src
 	${OPENSSL_INCLUDE_DIR}
 )
-TARGET_LINK_LIBRARIES(uSockets
+TARGET_LINK_LIBRARIES(uSockets PUBLIC
 	${OPENSSL_LIBRARIES}
 )
 

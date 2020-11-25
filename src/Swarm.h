@@ -1,10 +1,10 @@
 #ifndef OWT_SWARM_H
 #define OWT_SWARM_H
 
+#include <algorithm>
+#include <set>
 #include <string>
 #include <vector>
-#include <set>
-#include <algorithm>
 
 #include "PeerContext.h"
 
@@ -55,9 +55,7 @@ public:
     }
 
 	void setCompleted(PeerContext* peer) {
-		if (this->completedPeers.find(peer->id) == this->completedPeers.end()) {
-			this->completedPeers.insert(peer->id);
-		}
+		this->completedPeers.insert(peer->id);
 	}
 
 };
