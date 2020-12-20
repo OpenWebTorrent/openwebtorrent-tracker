@@ -20,15 +20,23 @@ make install
 sudo apt-get install zlib1g-dev
 ```
 
-## Usage
+## Build
 
-First, build the project:
+First, install dependencies:
+
+```sh
+make deps
+```
+
+Then, build the project:
 
 ```sh
 make build
 ```
 
-Then, you can run it;
+## Usage
+
+You can run it with the command below:
 
 ```sh
 ./build/openwebtorrent-tracker \
