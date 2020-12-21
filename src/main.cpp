@@ -32,8 +32,8 @@ int main(int argc, char** argv) {
 	}
 
 	// Key & Cert
-	std::string key = result["key"].as<std::string>();
-	std::string cert = result["cert"].as<std::string>();
+	std::string key = result["ssl-key"].as<std::string>();
+	std::string cert = result["ssl-cert"].as<std::string>();
 
 	bool debug = result["debug"].as<bool>();
 	if (debug) {
