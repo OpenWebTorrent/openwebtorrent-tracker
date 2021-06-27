@@ -69,25 +69,21 @@ public:
 			return;
 		}
 
-		for (std::string infoHash : peer->infoHashes) {
-			std::map<std::string, Swarm*>::iterator it = this->swarms.find(infoHash);
+		// Remove peer for from its swarms.
+		for (const auto& infoHash: peer->infoHashes) {
+			if (auto swarmIt = this->swarms.find(infoHash); swarmIt != this->swarms.end()) {
+				auto swarm = swarmIt->second;
+				swarm->removePeer(peer);
 
-			if (it == this->swarms.end()) {
-				continue;
-			}
-
-			Swarm* swarm = this->swarms[infoHash];
-			swarm->removePeer(peer);
-			peer->infoHashes.erase(infoHash);
-
-			if (swarm->getPeersCount() == 0) {
-				this->swarms.erase(infoHash);
-
-				// Free up space of swarm here
-				delete swarm;
+				// Free up space of swarm here.
+				if (swarm->getPeersCount() == 0) {
+					delete swarm;
+					this->swarms.erase(swarmIt);
+				}
 			}
 		}
 
+		peer->infoHashes.clear();
 		this->peers.erase(peer->id);
 	}
 
