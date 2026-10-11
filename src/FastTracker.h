@@ -53,6 +53,8 @@ public:
 				this->processStop(data, peer);
 			} else if (event == "completed") {
 				this->processAnnounce(data, peer, true);
+			} else if (event == "paused") {
+				this->processPause(data, peer);
 			} else {
 				throw TrackerException("unknown announce event");
 			}
@@ -190,6 +192,21 @@ private:
 		if (swarm->getPeersCount() == 0) {
 			this->swarms.erase(infoHash);
 		}
+	}
+
+	void processPause(json data, PeerContext* peer) {
+		// Validate params
+		if (data.count("info_hash") == 0 || !data["info_hash"].is_string()) {
+			throw TrackerException("announce: info_hash field is missing or wrong");
+		}
+
+		json response = {
+			{"action", "announce"},
+			{"info_hash", data["info_hash"]},
+			{"failure reason", "unsupported announce event: paused"}
+		};
+
+		peer->sendMessage(response);
 	}
 
 	void processScrape(json data, PeerContext* peer) {

@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            curl \
+            libssl-dev \
+            openssl \
+            zlib1g-dev
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build tracker
+        run: |
+          # CMakeLists.txt hard-codes GCC 8 after project(), which is not
+          # installed on the hosted runner. Remove those stale overrides in
+          # the temporary CI checkout so CMake uses the runner's compiler.
+          sed -i \
+            -e '\|SET(CMAKE_CC_COMPILER /usr/bin/gcc-8)|d' \
+            -e '\|SET(CMAKE_CXX_COMPILER /usr/bin/g++-8)|d' \
+            CMakeLists.txt
+
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel 2
+
+      - name: Install WebSocket test dependency
+        run: npm install --no-save ws
+
+      - name: Run paused-event test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout localhost-key.pem \
+            -out localhost.pem \
+            -days 1 \
+            -subj '/CN=localhost'
+
+          ./build/openwebtorrent-tracker \
+            --port 8000 \
+            --ssl-cert "$PWD/localhost.pem" \
+            --ssl-key "$PWD/localhost-key.pem" \
+            > tracker.log 2>&1 &
+          tracker_pid=$!
+
+          cleanup() {
+            kill "$tracker_pid" 2>/dev/null || true
+            wait "$tracker_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          ready=0
+          for attempt in $(seq 1 20); do
+            if curl --insecure --silent --fail \
+              https://localhost:8000/stats.json >/dev/null; then
+              ready=1
+              break
+            fi
+
+            if ! kill -0 "$tracker_pid" 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$ready" -ne 1 ]; then
+            echo 'Tracker failed to start. Log follows:'
+            cat tracker.log
+            exit 1
+          fi
+
+          node tests/node/test-paused.js
+
+      - name: Show tracker log on failure
+        if: failure()
+        run: cat tracker.log || true
