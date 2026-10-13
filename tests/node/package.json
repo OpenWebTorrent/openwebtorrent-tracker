@@ -7,7 +7,9 @@
     "ws": "^7.4.0"
   },
   "scripts": {
-    "test:peer-ids": "node test-peer-ids.js"
+    "test:peer-ids": "node test-peer-ids.js",
+    "test:paused": "node test-paused.js",
+    "test": "npm run test:peer-ids && npm run test:paused"
   },
   "author": "",
   "license": "MIT"

@@ -83,9 +83,9 @@ public:
 		if (action == "announce") {
 			std::string event = (data.count("event") > 0 && data["event"].is_string()) ? data["event"].get<std::string>() : "";
 
-			if (event == "") {
+			if (event == "" || event == "paused") {
 				if (data.count("answer") == 0) {
-					this->processAnnounce(data, peer);
+					this->processAnnounce(data, peer, false, event == "paused");
 				} else {
 					this->processAnswer(data, peer);
 				}
@@ -117,7 +117,7 @@ public:
 	}
 
 private:
-	void processAnnounce(json data, PeerContext* connection, bool completed = false) {
+	void processAnnounce(json data, PeerContext* connection, bool completed = false, bool paused = false) {
 		if (data.count("peer_id") == 0 || !data["peer_id"].is_string()) {
 			throw TrackerException("announce: peer_id field is missing or wrong");
 		}
@@ -162,8 +162,14 @@ private:
 
 		if (!swarm->hasPeer(peerId)) {
 			swarm->addPeer(connection, peerId, isPeerCompleted);
-		} else if (isPeerCompleted) {
+		}
+		if (isPeerCompleted) {
 			swarm->setCompleted(peerId);
+		} else if (paused) {
+			swarm->setPaused(peerId);
+		} else {
+			// A regular periodic announce means the partial seed resumed downloading.
+			swarm->setDownloading(peerId);
 		}
 
 		connection->sendMessage({
@@ -288,6 +294,7 @@ private:
 					{"complete", swarm->getCompletedCount()},
 					{"incomplete", swarm->getPeersCount() - swarm->getCompletedCount()},
 					{"downloaded", swarm->getCompletedCount()},
+					{"downloaders", swarm->getDownloadersCount()},
 				};
 			}
 		} else if (data["info_hash"].is_array()) {
@@ -303,9 +310,10 @@ private:
 						{"complete", swarm->getCompletedCount()},
 						{"incomplete", swarm->getPeersCount() - swarm->getCompletedCount()},
 						{"downloaded", swarm->getCompletedCount()},
+						{"downloaders", swarm->getDownloadersCount()},
 					};
 				} else {
-					files[infoHash] = {{"complete", 0}, {"incomplete", 0}, {"downloaded", 0}};
+					files[infoHash] = {{"complete", 0}, {"incomplete", 0}, {"downloaded", 0}, {"downloaders", 0}};
 				}
 			}
 		} else if (data["info_hash"].is_string()) {
@@ -317,9 +325,10 @@ private:
 					{"complete", swarm->getCompletedCount()},
 					{"incomplete", swarm->getPeersCount() - swarm->getCompletedCount()},
 					{"downloaded", swarm->getCompletedCount()},
+					{"downloaders", swarm->getDownloadersCount()},
 				};
 			} else {
-				files[infoHash] = {{"complete", 0}, {"incomplete", 0}, {"downloaded", 0}};
+				files[infoHash] = {{"complete", 0}, {"incomplete", 0}, {"downloaded", 0}, {"downloaders", 0}};
 			}
 		}
 

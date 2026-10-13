@@ -48,9 +48,9 @@ jobs:
           cmake --build build --parallel 2
 
       - name: Install WebSocket test dependency
-        run: npm install --no-save ws
+        run: npm --prefix tests/node install --no-save --no-audit --no-fund ws
 
-      - name: Run multiple-peer-ID integration test
+      - name: Run WebSocket integration test suites
         shell: bash
         run: |
           set -euo pipefail
@@ -95,7 +95,8 @@ jobs:
             exit 1
           fi
 
-          node tests/node/test-peer-ids.js
+          npm --prefix tests/node run test:peer-ids
+          TRACKER_ANNOUNCE_INTERVAL=2 npm --prefix tests/node run test:paused
 
       - name: Show tracker log on failure
         if: failure()

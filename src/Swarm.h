@@ -22,6 +22,7 @@ private:
 	std::string infoHash;
 	std::vector<Peer> peers;
 	std::set<std::string> completedPeers;
+	std::set<std::string> pausedPeers;
 
 public:
 	explicit Swarm(std::string infoHash) : infoHash(std::move(infoHash)) {}
@@ -38,6 +39,15 @@ public:
 		return static_cast<int>(this->completedPeers.size());
 	}
 
+	// BEP 21 partial seeds are incomplete, but not active downloaders.
+	int getDownloadersCount() const {
+		return static_cast<int>(this->peers.size() - this->completedPeers.size() - this->pausedPeers.size());
+	}
+
+	bool isCompleted(const std::string& peerId) const {
+		return this->completedPeers.count(peerId) != 0;
+	}
+
 	std::vector<Peer> getPeers() const {
 		return this->peers;
 	}
@@ -52,19 +62,33 @@ public:
 			this->peers.push_back({connection, peerId});
 		}
 		if (completed) {
-			this->completedPeers.insert(peerId);
+			this->setCompleted(peerId);
 		}
 	}
 
 	void removePeer(const std::string& peerId) {
 		this->completedPeers.erase(peerId);
+		this->pausedPeers.erase(peerId);
 		this->peers.erase(std::remove_if(this->peers.begin(), this->peers.end(),
 			[&](const Peer& peer) { return peer.peerId == peerId; }), this->peers.end());
 	}
 
 	void setCompleted(const std::string& peerId) {
 		if (this->hasPeer(peerId)) {
+			this->pausedPeers.erase(peerId);
 			this->completedPeers.insert(peerId);
+		}
+	}
+
+	void setPaused(const std::string& peerId) {
+		if (this->hasPeer(peerId) && !this->isCompleted(peerId)) {
+			this->pausedPeers.insert(peerId);
+		}
+	}
+
+	void setDownloading(const std::string& peerId) {
+		if (this->hasPeer(peerId) && !this->isCompleted(peerId)) {
+			this->pausedPeers.erase(peerId);
 		}
 	}
 };
