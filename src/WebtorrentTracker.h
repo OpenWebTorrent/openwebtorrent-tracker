@@ -1,6 +1,7 @@
 #ifndef OWT_WEBTORRENT_TRACKER_H
 #define OWT_WEBTORRENT_TRACKER_H
 
+#include <chrono>
 #include <exception>
 #include <iostream>
 #include <string>
@@ -36,7 +37,7 @@ private:
 
 public:
 
-	WebtorrentTracker(int port, std::string host, std::string keyFile, std::string certFile) {
+	WebtorrentTracker(int port, std::string host, std::string keyFile, std::string certFile, int announceInterval = 120) {
 		// Settings
 		this->port = port;
 		this->host = host;
@@ -46,10 +47,12 @@ public:
 
 		// Initialize
 		this->websocketCount = 0;
-		this->tracker = new FastTracker();
+		this->tracker = new FastTracker(20, announceInterval);
 	}
 
 	WebtorrentTracker(int port, std::string keyFile, std::string certFile) : WebtorrentTracker(port, "0.0.0.0", keyFile, certFile) {}
+
+	WebtorrentTracker(int port, std::string keyFile, std::string certFile, int announceInterval) : WebtorrentTracker(port, "0.0.0.0", keyFile, certFile, announceInterval) {}
 
 	WebtorrentTracker(std::string host, std::string keyFile, std::string certFile) : WebtorrentTracker(0, host, keyFile, certFile) {}
 
@@ -66,6 +69,20 @@ public:
 		if (!exists) {
 			throw std::runtime_error("Cert and key must exists");
 		}
+
+		// Tracker state is owned by this event loop. Run expiry on the loop
+		// itself rather than mutating tracker maps from a timer thread.
+		auto* loop = uWS::Loop::get();
+		auto* fastTracker = static_cast<FastTracker*>(this->tracker);
+		auto nextCleanup = std::chrono::steady_clock::now() +
+			std::chrono::seconds(fastTracker->getAnnounceInterval());
+		loop->addPreHandler(this, [&nextCleanup, fastTracker](uWS::Loop*) {
+			const auto now = std::chrono::steady_clock::now();
+			if (now >= nextCleanup) {
+				fastTracker->cleanupStalePeers();
+				nextCleanup = now + std::chrono::seconds(fastTracker->getAnnounceInterval());
+			}
+		});
 
 		uWS::SSLApp({
 			.key_file_name = this->keyFile.c_str(),
@@ -133,13 +150,15 @@ public:
 			std::string status = "404 Not Found";
 			res->writeStatus(status);
 			res->end(status);
-        }).listen(this->port, [this](auto *token) {
+		}).listen(this->port, [this](auto *token) {
 			if (token) {
 				COUT("Listening on port " << this->port);
 			} else {
 				EOUT("Error: Failed to listen on port " << this->port);
-            }
+			}
 		}).run();
+
+		loop->removePreHandler(this);
 	}
 
 private:
@@ -149,7 +168,7 @@ private:
 
 		this->websocketCount++;
 
-		// Intiialze peer context
+		// Initialize connection context
 		PeerContext* peer = static_cast<PeerContext*>(ws->getUserData());
 		peer->ws = ws;
 	}
@@ -182,7 +201,7 @@ private:
 		this->websocketCount--;
 
 		PeerContext* peer = static_cast<PeerContext*>(ws->getUserData());
-		if (!peer->id.empty()) {
+		if (!peer->peerIds.empty()) {
 			this->tracker->disconnectPeer(peer);
 		}
 	}
@@ -197,4 +216,3 @@ private:
 };
 
 #endif // OWT_WEBTORRENT_TRACKER_H
-

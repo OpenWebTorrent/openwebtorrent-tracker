@@ -12,6 +12,7 @@ int main(int argc, char** argv) {
 		("p,port", "Port", cxxopts::value<int>()->default_value("8000"))
 		("k,ssl-key", "SSL key", cxxopts::value<std::string>()->default_value("./localhost-key.pem"))
 		("c,ssl-cert", "SSL certificate", cxxopts::value<std::string>()->default_value("./localhost.pem"))
+		("announce-interval", "Announce interval in seconds", cxxopts::value<int>()->default_value("120"))
 		("d,debug", "Debug", cxxopts::value<bool>()->default_value("false"))
 		("h,help", "Print usage")
 	;
@@ -40,7 +41,13 @@ int main(int argc, char** argv) {
 		owt::Utils::Logger::set_log_level("LOG_DEBUG");
 	}
 
-	owt::WebtorrentTracker tracker(port, key, cert);
+	int announceInterval = result["announce-interval"].as<int>();
+	if (announceInterval <= 0) {
+		std::cerr << "Announce interval must be positive" << std::endl;
+		return 1;
+	}
+
+	owt::WebtorrentTracker tracker(port, key, cert, announceInterval);
 
 	try {
 		tracker.run();
