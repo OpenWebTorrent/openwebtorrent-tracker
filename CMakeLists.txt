@@ -1,13 +1,16 @@
 # CMake version
-CMAKE_MINIMUM_REQUIRED(VERSION 3.5.1)
+CMAKE_MINIMUM_REQUIRED(VERSION 3.10)
 
 # Project
-PROJECT(openwebtorrent-tracker)
+PROJECT(openwebtorrent-tracker C CXX)
 
-# Add a compiler flag
-SET(CMAKE_CC_COMPILER /usr/bin/gcc-8)
-SET(CMAKE_CXX_COMPILER /usr/bin/g++-8)
-SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -DLIBUS_USE_OPENSSL -lssl -lcrypto -lstdc++")
+SET(CMAKE_CXX_STANDARD 20)
+SET(CMAKE_CXX_STANDARD_REQUIRED ON)
+IF(NOT CMAKE_BUILD_TYPE)
+	SET(CMAKE_BUILD_TYPE Release)
+ENDIF()
+
+OPTION(OWT_BUILD_TESTS "Build the unit tests" OFF)
 
 # Dependencies
 SET(CMAKE_INCLUDE_CURRENT_DIR ON)
@@ -38,3 +41,11 @@ FILE(GLOB_RECURSE HEADERS src/*.h)
 FILE(GLOB_RECURSE SOURCES src/*.cpp)
 ADD_EXECUTABLE(${PROJECT_NAME} ${HEADERS} ${SOURCES})
 TARGET_LINK_LIBRARIES(${PROJECT_NAME} ${LIBRARIES})
+
+# Tests (tracker logic only, no network needed)
+IF(OWT_BUILD_TESTS)
+	ENABLE_TESTING()
+	ADD_EXECUTABLE(tracker_test tests/tracker_test.cpp)
+	TARGET_INCLUDE_DIRECTORIES(tracker_test PRIVATE src)
+	ADD_TEST(NAME tracker_test COMMAND tracker_test)
+ENDIF()

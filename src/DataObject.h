@@ -12,14 +12,14 @@ namespace owt {
 		int websocketCount;
 	};
 
-	static void to_json(json& j, const ServerStats& value) {
+	inline void to_json(json& j, const ServerStats& value) {
 		j = json{
 			{"server", value.server},
 			{"websocketCount", value.websocketCount}
 		};
 	}
 
-	static void from_json(const json& j, ServerStats& value) {
+	inline void from_json(const json& j, ServerStats& value) {
 		j.at("server").get_to(value.server);
 		j.at("websocketCount").get_to(value.websocketCount);
 	}
@@ -31,7 +31,7 @@ namespace owt {
 		int external;
 	};
 
-	static void to_json(json& j, const ProcessMemory& value) {
+	inline void to_json(json& j, const ProcessMemory& value) {
 		j = json{
 			{"rss", value.rss},
 			{"heapTotal", value.heapTotal},
@@ -40,7 +40,7 @@ namespace owt {
 		};
 	}
 
-	static void from_json(const json& j, ProcessMemory& value) {
+	inline void from_json(const json& j, ProcessMemory& value) {
 		j.at("rss").get_to(value.rss);
 		j.at("heapTotal").get_to(value.heapTotal);
 		j.at("heapUsed").get_to(value.heapUsed);
