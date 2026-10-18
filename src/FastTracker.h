@@ -1,16 +1,18 @@
+
 #ifndef OWT_FASTTRACKER_H
 #define OWT_FASTTRACKER_H
 
 #include <string>
-#include <map>
+#include <unordered_map>
 #include <json.hpp>
 #include <algorithm>
-#include <math.h>
+#include <random>
 
 #include "Tracker.h"
 #include "TrackerException.h"
 #include "PeerContext.h"
 #include "Swarm.h"
+#include "Utils.h"
 
 using namespace nlohmann;
 
@@ -18,34 +20,41 @@ namespace owt {
 
 class FastTracker : public Tracker {
 private:
-	std::map<std::string, Swarm*> swarms;
-	std::map<std::string, PeerContext*> peers;
+	SwarmMap swarms;
+	std::unordered_map<std::string, PeerContext*> peers;
 
-	int maxOffers;
-	int announceInterval;
+	TrackerOptions options;
+
+	std::mt19937 rng{std::random_device{}()};
 
 public:
 
+	explicit FastTracker(const TrackerOptions& options) : options(options) {}
+
 	FastTracker(int maxOffers = 20, int announceInterval = 120) {
-		this->maxOffers = maxOffers;
-		this->announceInterval = announceInterval;
+		this->options.maxOffers = maxOffers;
+		this->options.announceInterval = announceInterval;
 	}
 
-	std::map<std::string, Swarm*> getSwarms() {
+	const SwarmMap& getSwarms() const override {
 		return this->swarms;
 	}
 
-	void processMessage(json data, PeerContext* peer) {
-		std::string action = (data.count("action") > 0) ? data["action"] : "";
+	void processMessage(const json& data, PeerContext* peer) override {
+		if (!data.is_object()) {
+			throw TrackerException("message must be a JSON object");
+		}
+
+		std::string action = optionalString(data, "action");
 
 		if (action == "announce") {
-			std::string event = (data.count("event") > 0) ? data["event"] : "";
+			std::string event = optionalString(data, "event");
 
-			if (event == "") {
-				if (data.count("answer") == 0) {
-					this->processAnnounce(data, peer);
-				} else {
+			if (event == "" || event == "update" || event == "paused") {
+				if (data.contains("answer")) {
 					this->processAnswer(data, peer);
+				} else {
+					this->processAnnounce(data, peer);
 				}
 			} else if (event == "started") {
 				this->processAnnounce(data, peer);
@@ -57,191 +66,196 @@ public:
 				throw TrackerException("unknown announce event");
 			}
 		} else if (action == "scrape") {
-		    this->processScrape(data, peer);
+			this->processScrape(data, peer);
 		} else {
 			throw TrackerException("unknown action");
 		}
 	}
 
-	void disconnectPeer(PeerContext* peer) {
+	void disconnectPeer(PeerContext* peer) override {
 		// Peer didn't send any id
 		if (peer->id.empty()) {
 			return;
 		}
 
-		// Remove peer for from its swarms.
+		// Remove peer from its swarms.
 		for (const auto& infoHash: peer->infoHashes) {
-			if (auto swarmIt = this->swarms.find(infoHash); swarmIt != this->swarms.end()) {
-				auto swarm = swarmIt->second;
-				swarm->removePeer(peer);
-
-				// Free up space of swarm here.
-				if (swarm->getPeersCount() == 0) {
-					delete swarm;
-					this->swarms.erase(swarmIt);
-				}
-			}
+			this->removePeerFromSwarm(peer, infoHash);
 		}
-
 		peer->infoHashes.clear();
-		this->peers.erase(peer->id);
+
+		// Only unregister the id if it still belongs to this peer (it may
+		// have been taken over by a newer connection with the same peer_id).
+		if (auto it = this->peers.find(peer->id); it != this->peers.end() && it->second == peer) {
+			this->peers.erase(it);
+		}
+		peer->id.clear();
 	}
 
 private:
 
-	 void processAnnounce(json data, PeerContext* peer, bool completed = false) {
-		// Validate params
-		if (data.count("peer_id") == 0 || !data["peer_id"].is_string()) {
-			throw TrackerException("announce: peer_id field is missing or wrong");
+	// Returns the string value of an optional field, "" if missing or null
+	static std::string optionalString(const json& data, const char* key) {
+		auto it = data.find(key);
+		if (it == data.end() || it->is_null()) {
+			return "";
 		}
-		if (data.count("info_hash") == 0 || !data["info_hash"].is_string()) {
-			throw TrackerException("announce: info_hash field is missing or wrong");
+		if (!it->is_string()) {
+			throw TrackerException(std::string(key) + " field must be a string");
 		}
+		return it->get<std::string>();
+	}
 
-		std::string infoHash = data["info_hash"];
-		std::string peerId = data["peer_id"];
-		Swarm* swarm = NULL;
+	// info_hash and peer_id are 20-byte binary strings (one code point per byte)
+	static std::string requireBinaryId(const json& data, const char* key) {
+		auto it = data.find(key);
+		if (it == data.end() || !it->is_string() || Utils::binaryStringLength(it->get_ref<const std::string&>()) != 20) {
+			throw TrackerException(std::string(key) + " field is missing or wrong");
+		}
+		return it->get<std::string>();
+	}
 
+	static bool isValidInfoHash(const json& value) {
+		return value.is_string() && Utils::binaryStringLength(value.get_ref<const std::string&>()) == 20;
+	}
+
+	// Associates a peer_id with the connection
+	void bindPeerId(PeerContext* peer, const std::string& peerId) {
 		if (peer->id.empty()) {
-			// New socket with no peer attached
-			peer->id = peerId;
-
-			// Peer has changed of socket
-			if (this->peers.find(peerId) != this->peers.end()) {
-				this->disconnectPeer(this->peers[peerId]);
+			// Peer has changed of socket: detach the old one
+			if (auto it = this->peers.find(peerId); it != this->peers.end() && it->second != peer) {
+				this->disconnectPeer(it->second);
 			}
 
-			// Add to peers
+			peer->id = peerId;
 			this->peers[peerId] = peer;
 		} else if (peer->id != peerId) {
 			throw TrackerException("announce: different peer_id on the same connection");
-		} else {
-			// Get swarm from "peer"
-			std::set<std::string>::iterator it = peer->infoHashes.find(infoHash);
-			if (it != peer->infoHashes.end()) {
-				std::map<std::string, Swarm*>::iterator it = this->swarms.find(infoHash);
-				if (it != this->swarms.end()) {
-					swarm = it->second;
-				}
-			}
+		}
+	}
+
+	void processAnnounce(const json& data, PeerContext* peer, bool completed = false) {
+		// Validate params
+		std::string infoHash = requireBinaryId(data, "info_hash");
+		std::string peerId = requireBinaryId(data, "peer_id");
+
+		auto offersIt = data.find("offers");
+		if (offersIt != data.end() && !offersIt->is_array()) {
+			throw TrackerException("announce: offers field is not an array");
 		}
 
-		bool isPeerCompleted = (completed || (data.count("left") > 0 && data["left"].is_number() && data["left"] == 0));
+		this->bindPeerId(peer, peerId);
 
-		if (swarm == NULL) {
-			// Not yet in swarm
-			swarm = this->addPeerToSwarm(peer, infoHash, isPeerCompleted);
-		} else if (swarm != NULL) {
-			// Peer is already in swarm
-			if (isPeerCompleted) {
-				swarm->setCompleted(peer);
-			}
-		} else {
-			throw TrackerException("announce: illegal info_hash field");
+		auto leftIt = data.find("left");
+		bool isSeeder = completed || (leftIt != data.end() && leftIt->is_number() && *leftIt == 0);
+
+		Swarm* swarm = this->addPeerToSwarm(peer, infoHash);
+		if (isSeeder && swarm->setCompleted(peer) && completed) {
+			swarm->addDownload();
 		}
 
 		peer->sendMessage({
 			{"action", "announce"},
-			{"interval", this->announceInterval},
+			{"interval", this->options.announceInterval},
 			{"info_hash", infoHash},
 			{"complete", swarm->getCompletedCount()},
-			{"incomplete", swarm->getPeersCount() - swarm->getCompletedCount()},
+			{"incomplete", swarm->getIncompleteCount()},
 		});
 
-		this->sendOffersToPeers(data, swarm->getPeers(), peer, infoHash);
+		if (offersIt != data.end()) {
+			this->sendOffersToPeers(data, *offersIt, swarm, peer, infoHash);
+		}
 	}
 
-	void processAnswer(json data, PeerContext* peer) {
+	void processAnswer(const json& data, PeerContext* peer) {
 		// Validate params
-		if (data.count("to_peer_id") == 0 || !data["to_peer_id"].is_string()) {
-			throw TrackerException("announce: to_peer_id field is missing or wrong");
+		std::string infoHash = requireBinaryId(data, "info_hash");
+		std::string toPeerId = requireBinaryId(data, "to_peer_id");
+
+		const json& answer = data["answer"];
+		if (!answer.is_object() || !answer.contains("sdp") || !answer["sdp"].is_string()) {
+			throw TrackerException("answer: answer field is missing or wrong");
+		}
+		if (!data.contains("offer_id") || !data["offer_id"].is_string()) {
+			throw TrackerException("answer: offer_id field is missing or wrong");
 		}
 
-		std::string toPeerId = data["to_peer_id"];
-		std::map<std::string, PeerContext*>::iterator it = this->peers.find(toPeerId);
-		if (it == this->peers.end()) {
-			throw TrackerException("answer: to_peer_id is not in the swarm");
+		if (peer->id.empty()) {
+			this->bindPeerId(peer, requireBinaryId(data, "peer_id"));
 		}
 
-		PeerContext* toPeer = it->second;
-		data["peer_id"] = peer->id;
-		data.erase("to_peer_id");
-		toPeer->sendMessage(data);
-	}
-
-	void processStop(json data, PeerContext* peer) {
-		// Validate params
-		if (data.count("info_hash") == 0 || !data["info_hash"].is_string()) {
-			throw TrackerException("announce: info_hash field is missing or wrong");
-		}
-		std::string infoHash = data["info_hash"];
-
-		std::map<std::string, Swarm*>::iterator it = this->swarms.find(infoHash);
-		if (it == this->swarms.end()) {
+		// Both peers must be in the swarm. The target may have just left,
+		// which is a normal race, so the answer is silently dropped.
+		auto swarmIt = this->swarms.find(infoHash);
+		auto toPeerIt = this->peers.find(toPeerId);
+		if (swarmIt == this->swarms.end() || toPeerIt == this->peers.end() ||
+				!swarmIt->second->hasPeer(toPeerIt->second) || !swarmIt->second->hasPeer(peer)) {
+			DOUT("answer: to_peer_id is not in the swarm");
 			return;
 		}
 
-		Swarm* swarm = it->second;
-
-		swarm->removePeer(peer);
-
-		peer->infoHashes.erase(infoHash);
-
-		if (swarm->getPeersCount() == 0) {
-			this->swarms.erase(infoHash);
-		}
+		toPeerIt->second->sendMessage({
+			{"action", "announce"},
+			{"answer", {
+				{"type", "answer"},
+				{"sdp", answer["sdp"]},
+			}},
+			{"offer_id", data["offer_id"]},
+			{"peer_id", peer->id},
+			{"info_hash", infoHash},
+		});
 	}
 
-	void processScrape(json data, PeerContext* peer) {
-		std::map<std::string, json> files;
+	void processStop(const json& data, PeerContext* peer) {
+		// Validate params
+		std::string infoHash = requireBinaryId(data, "info_hash");
 
-		if (data.count("info_hash") == 0) {
-			for (const auto& entry : this->swarms) {
-				Swarm* swarm = entry.second;
-				files[swarm->getInfoHash()] = {
-					{"complete", swarm->getCompletedCount()},
-					{"incomplete", swarm->getPeersCount() - swarm->getCompletedCount()},
-					{"downloaded", swarm->getCompletedCount()},
-				};
-			}
-		} else if (data["info_hash"].is_array()) {
-			for (json::iterator it = data["info_hash"].begin(); it != data["info_hash"].end(); it++) {
-				if ((*it).is_string()) {
-					std::string singleInfoHash = *it;
-					std::map<std::string, Swarm*>::iterator swarmIt = this->swarms.find(singleInfoHash);
-					if (swarmIt != this->swarms.end()) {
-						Swarm* swarm = swarmIt->second;
-						files[singleInfoHash] = {
-							{"complete", swarm->getCompletedCount()},
-							{"incomplete", swarm->getPeersCount() - swarm->getCompletedCount()},
-							{"downloaded", swarm->getCompletedCount()},
-						};
-					} else {
-						files[singleInfoHash] = {
-							{"complete", 0},
-							{"incomplete", 0},
-							{"downloaded", 0},
-						};
-					}
-				}
-			}
-		} else if (data["info_hash"].is_string()) {
-			std::string infoHash = data["info_hash"];
-			std::map<std::string, Swarm*>::iterator it = this->swarms.find(infoHash);
+		this->removePeerFromSwarm(peer, infoHash);
+		peer->infoHashes.erase(infoHash);
+	}
+
+	void processScrape(const json& data, PeerContext* peer) {
+		json files = json::object();
+
+		auto addFile = [&](const std::string& infoHash) {
+			auto it = this->swarms.find(infoHash);
 			if (it != this->swarms.end()) {
-				Swarm* swarm = it->second;
+				Swarm* swarm = it->second.get();
 				files[infoHash] = {
 					{"complete", swarm->getCompletedCount()},
-					{"incomplete", swarm->getPeersCount() - swarm->getCompletedCount()},
-					{"downloaded", swarm->getCompletedCount()},
+					{"incomplete", swarm->getIncompleteCount()},
+					{"downloaded", swarm->getDownloadedCount()},
 				};
 			} else {
-				files[infoHash] =  {
+				files[infoHash] = {
 					{"complete", 0},
 					{"incomplete", 0},
 					{"downloaded", 0},
 				};
 			}
+		};
+
+		auto infoHashIt = data.find("info_hash");
+		if (infoHashIt == data.end() || infoHashIt->is_null()) {
+			if (!this->options.allowFullScrape) {
+				throw TrackerException("scrape: full scrape is disabled");
+			}
+			for (const auto& entry : this->swarms) {
+				addFile(entry.first);
+			}
+		} else if (infoHashIt->is_array()) {
+			if (infoHashIt->size() > this->options.maxScrapeInfoHashes) {
+				throw TrackerException("scrape: too many info_hash values");
+			}
+			for (const auto& item : *infoHashIt) {
+				if (isValidInfoHash(item)) {
+					addFile(item.get<std::string>());
+				}
+			}
+		} else if (isValidInfoHash(*infoHashIt)) {
+			addFile(infoHashIt->get<std::string>());
+		} else {
+			throw TrackerException("scrape: info_hash field is wrong");
 		}
 
 		peer->sendMessage({
@@ -250,100 +264,78 @@ private:
 		});
 	}
 
-	Swarm* addPeerToSwarm(PeerContext* peer, std::string infoHash, bool completed) {
-		std::map<std::string, Swarm*>::iterator it = this->swarms.find(infoHash);
-		Swarm* swarm;
-
-		if (it == this->swarms.end()) {
-			swarm = new Swarm(infoHash);
-			this->swarms[infoHash] = swarm;
-		} else {
-			swarm = it->second;
+	Swarm* addPeerToSwarm(PeerContext* peer, const std::string& infoHash) {
+		size_t maxSwarms = this->options.maxSwarmsPerPeer;
+		if (maxSwarms > 0 && peer->infoHashes.size() >= maxSwarms && peer->infoHashes.count(infoHash) == 0) {
+			throw TrackerException("announce: too many torrents on this connection");
 		}
 
-		swarm->addPeer(peer, completed);
+		auto& swarm = this->swarms[infoHash];
+		if (!swarm) {
+			swarm = std::make_unique<Swarm>(infoHash);
+		}
 
+		swarm->addPeer(peer, false);
 		peer->infoHashes.insert(infoHash);
 
-		return swarm;
+		return swarm.get();
 	}
 
-	void sendOffersToPeers(json data, std::vector<PeerContext*> peers, PeerContext* peer, std::string infoHash) {
-		// Check if there are other peeers
-		if (peers.size() <= 1) {
+	void removePeerFromSwarm(PeerContext* peer, const std::string& infoHash) {
+		auto it = this->swarms.find(infoHash);
+		if (it == this->swarms.end()) {
 			return;
 		}
 
-		// Offers
-		if (data.count("offers") == 0) {
-			return;
-		} else if (!data["offers"].is_array()) {
-			throw TrackerException("announce: offers field is not an array");
-		}
-		json offers = data["offers"];
+		it->second->removePeer(peer);
 
-		// Numwant
-		if (data.count("numwant") == 0 || !data["numwant"].is_number()) {
-			return;
-		}
-		int numwant = data["numwant"];
-
-		int countPeersToSend = peers.size() - 1;
-		int countOffersToSend = std::min(countPeersToSend, std::min((int) offers.size(), std::min(this->maxOffers, numwant)));
-
-		if (countOffersToSend == countPeersToSend) {
-			// We have offers for all the peers from the swarm - send offers to all
-			int i = 0;
-			for (const auto& toPeer : peers) {
-				if (toPeer != peer) {
-					this->sendOffer(offers[i], peer->id, toPeer, infoHash);
-					i++;
-				}
-			}
-		} else {
-			// Send offers to random peers
-			srand((unsigned int) time (NULL));
-			int peerIndex = rand() % peers.size();
-
-			for (int i = 0; i < countOffersToSend; i++) {
-				PeerContext* toPeer = peers[peerIndex];
-
-				if (toPeer == peer) {
-					// Do one more iteration
-					i--;
-				} else {
-					this->sendOffer(offers[i], peer->id, toPeer, infoHash);
-				}
-
-				peerIndex++;
-				if (peerIndex == peers.size()) {
-					peerIndex = 0;
-				}
-			}
+		// Free up space of swarm here.
+		if (it->second->getPeersCount() == 0) {
+			this->swarms.erase(it);
 		}
 	}
 
-	void sendOffer(json offerItem, std::string fromPeerId, PeerContext* toPeer, std::string infoHash) {
-		// Validate params
-		if (offerItem.count("offer") == 0 || offerItem.count("offer_id") == 0) {
-			throw TrackerException("announce: wrong offer item format");
+	void sendOffersToPeers(const json& data, const json& offers, Swarm* swarm, PeerContext* peer, const std::string& infoHash) {
+		size_t count = std::min(offers.size(), (size_t) std::max(this->options.maxOffers, 0));
+
+		// Numwant (optional, clients always send one offer per wanted peer)
+		auto numwantIt = data.find("numwant");
+		if (numwantIt != data.end() && numwantIt->is_number()) {
+			count = (size_t) std::clamp(numwantIt->get<double>(), 0.0, (double) count);
 		}
 
-		json offer = offerItem["offer"];
-		json offerId = offerItem["offer_id"];
-
-		if (offer.count("sdp") == 0) {
-			 throw TrackerException("announce: wrong offer item field format");
+		if (count == 0 || swarm->getPeersCount() <= 1) {
+			return;
 		}
 
+		// Validate the offers before sending anything
+		for (size_t i = 0; i < count; i++) {
+			const json& item = offers[i];
+			if (!item.is_object() || !item.contains("offer_id") || !item["offer_id"].is_string() ||
+					!item.contains("offer") || !item["offer"].is_object()) {
+				throw TrackerException("announce: wrong offer item format");
+			}
+			const json& offer = item["offer"];
+			if (!offer.contains("sdp") || !offer["sdp"].is_string()) {
+				throw TrackerException("announce: wrong offer item field format");
+			}
+		}
+
+		std::vector<PeerContext*> toPeers = swarm->getRandomPeers(count, peer, this->rng);
+		for (size_t i = 0; i < toPeers.size(); i++) {
+			this->sendOffer(offers[i], peer->id, toPeers[i], infoHash);
+		}
+	}
+
+	void sendOffer(const json& offerItem, const std::string& fromPeerId, PeerContext* toPeer, const std::string& infoHash) {
 		toPeer->sendMessage({
 			{"action", "announce"},
 			{"info_hash", infoHash},
-			{"offer_id", offerId}, // offerId is not validated to be a string
+			{"offer_id", offerItem["offer_id"]},
 			{"peer_id", fromPeerId},
 			{"offer", {
 				{"type", "offer"},
-				{"sdp", offer["sdp"]}, // offer.sdp is not validated to be a string
+				{"sdp", offerItem["offer"]["sdp"]},
 			}}
 		});
 	}

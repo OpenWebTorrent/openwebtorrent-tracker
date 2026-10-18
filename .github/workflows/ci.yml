@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Oldest supported compiler (C++20 is required by uWebSockets v20)
+          - name: gcc-10
+            os: ubuntu-22.04
+            cc: gcc-10
+            cxx: g++-10
+            packages: g++-10
+          - name: gcc
+            os: ubuntu-24.04
+            cc: gcc
+            cxx: g++
+          - name: clang
+            os: ubuntu-24.04
+            cc: clang
+            cxx: clang++
+          - name: sanitizers
+            os: ubuntu-24.04
+            cc: gcc
+            cxx: g++
+            flags: -fsanitize=address,undefined -fno-omit-frame-pointer
+            build_type: Debug
+
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev zlib1g-dev ${{ matrix.packages }}
+          make deps
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DOWT_BUILD_TESTS=ON \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type || 'Release' }} \
+            -DCMAKE_C_FLAGS="${{ matrix.flags }}" \
+            -DCMAKE_CXX_FLAGS="${{ matrix.flags }}" \
+            -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.flags }}"
+          cmake --build build -j "$(nproc)"
+
+      - name: Unit tests
+        run: ctest --test-dir build --output-on-failure
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Integration tests
+        working-directory: tests/node
+        run: |
+          npm install
+          npm test
