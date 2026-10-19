@@ -8,7 +8,9 @@
   },
   "devDependencies": {},
   "scripts": {
-    "test": "node --test test.js"
+    "test": "node --test test.js",
+    "test:peer-ids": "node test-peer-ids.js",
+    "test:paused": "node test-paused.js"
   },
   "author": "",
   "license": "MIT"

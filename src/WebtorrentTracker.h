@@ -184,8 +184,22 @@ private:
 			throw std::runtime_error("Failed to listen on " + this->getAddress());
 		}
 
+		// Stale peer expiry runs on the event loop that owns the tracker state
+		struct us_timer_t* cleanupTimer = nullptr;
+		if (unsigned int period = this->tracker->getCleanupPeriodMs(); period > 0) {
+			cleanupTimer = us_create_timer((struct us_loop_t*) uWS::Loop::get(), 1, sizeof(Tracker*));
+			*(Tracker**) us_timer_ext(cleanupTimer) = this->tracker.get();
+			us_timer_set(cleanupTimer, [](struct us_timer_t* timer) {
+				(*(Tracker**) us_timer_ext(timer))->cleanupStalePeers();
+			}, (int) period, (int) period);
+		}
+
 		COUT("Listening on " << (SSL ? "wss://" : "ws://") << this->getAddress());
 		app.run();
+
+		if (cleanupTimer != nullptr) {
+			us_timer_close(cleanupTimer);
+		}
 	}
 
 	template <bool SSL>

@@ -3,7 +3,7 @@
 
 const { test, before, after } = require('node:test')
 const assert = require('node:assert')
-const { spawn } = require('node:child_process')
+const { spawn, execFile } = require('node:child_process')
 const path = require('node:path')
 const WebSocket = require('ws')
 
@@ -13,6 +13,9 @@ const URL = `ws://127.0.0.1:${PORT}`
 // Second tracker with tight limits
 const LIMITED_PORT = PORT + 1
 const LIMITED_URL = `ws://127.0.0.1:${LIMITED_PORT}`
+// Third tracker for test-peer-ids.js and test-paused.js (short interval to test expiry)
+const SUITES_PORT = PORT + 2
+const SUITES_INTERVAL = 2
 
 const INFO_HASH = 'i'.repeat(20)
 const id = (c) => c.repeat(20)
@@ -31,7 +34,8 @@ function startTracker (port, args = []) {
 
 before(() => Promise.all([
   startTracker(PORT),
-  startTracker(LIMITED_PORT, ['--rate-limit', '5', '--rate-burst', '10', '--max-connections-per-ip', '2', '--trust-proxy'])
+  startTracker(LIMITED_PORT, ['--rate-limit', '5', '--rate-burst', '10', '--max-connections-per-ip', '2', '--trust-proxy']),
+  startTracker(SUITES_PORT, ['--announce-interval', String(SUITES_INTERVAL), '--allow-full-scrape'])
 ]))
 
 after(() => trackers.forEach((t) => t.kill()))
@@ -177,3 +181,14 @@ test('connections per IP are limited', async () => {
   const e = await connect(LIMITED_URL, { 'X-Forwarded-For': '10.0.0.2' })
   for (const s of [b, c, d, e]) s.close()
 })
+
+// Multiple peer IDs per connection and BEP 21 suites (contributed in #27)
+for (const suite of ['test-peer-ids.js', 'test-paused.js']) {
+  test(suite, () => new Promise((resolve, reject) => {
+    const env = { ...process.env, TRACKER_URL: `ws://127.0.0.1:${SUITES_PORT}`, TRACKER_ANNOUNCE_INTERVAL: String(SUITES_INTERVAL) }
+    execFile(process.execPath, [path.join(__dirname, suite)], { env, timeout: 60000 }, (err, stdout, stderr) => {
+      if (err) reject(new Error(`${suite} failed:\n${stdout}${stderr}`))
+      else resolve()
+    })
+  }))
+}
