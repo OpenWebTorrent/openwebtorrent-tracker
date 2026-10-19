@@ -18,7 +18,7 @@ struct TrackerOptions {
 	int maxOffers = 20;
 	// Announce interval sent to clients, in seconds
 	int announceInterval = 120;
-	// Maximum number of torrents a single connection can join (0 = unlimited)
+	// Maximum memberships (peer ID + torrent) per connection (0 = unlimited)
 	size_t maxSwarmsPerPeer = 1000;
 	// Scrape without info_hash returns every torrent: expensive on big trackers
 	bool allowFullScrape = false;
@@ -37,6 +37,11 @@ public:
 	virtual void disconnectPeer(PeerContext* peer) = 0;
 
 	virtual const SwarmMap& getSwarms() const = 0;
+
+	// Called periodically: removes memberships that stopped announcing
+	virtual void cleanupStalePeers() {}
+	// How often cleanupStalePeers should run, in milliseconds (0 = never)
+	virtual unsigned int getCleanupPeriodMs() const { return 0; }
 
 };
 

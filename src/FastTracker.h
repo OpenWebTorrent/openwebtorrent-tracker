@@ -4,8 +4,11 @@
 
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 #include <json.hpp>
 #include <algorithm>
+#include <chrono>
 #include <random>
 
 #include "Tracker.h"
@@ -20,7 +23,10 @@ namespace owt {
 
 class FastTracker : public Tracker {
 private:
+	using Clock = PeerContext::Clock;
+
 	SwarmMap swarms;
+	// A peer ID identifies a swarm member; several peer IDs may share one connection.
 	std::unordered_map<std::string, PeerContext*> peers;
 
 	TrackerOptions options;
@@ -54,7 +60,7 @@ public:
 				if (data.contains("answer")) {
 					this->processAnswer(data, peer);
 				} else {
-					this->processAnnounce(data, peer);
+					this->processAnnounce(data, peer, false, event == "paused");
 				}
 			} else if (event == "started") {
 				this->processAnnounce(data, peer);
@@ -72,24 +78,50 @@ public:
 		}
 	}
 
+	// Called when the connection closes: removes every peer ID it carries
 	void disconnectPeer(PeerContext* peer) override {
-		// Peer didn't send any id
-		if (peer->id.empty()) {
-			return;
+		std::vector<std::string> peerIds;
+		for (const auto& entry : peer->memberships) {
+			peerIds.push_back(entry.first);
+		}
+		for (const auto& peerId : peerIds) {
+			this->removePeerId(peerId, peer);
+		}
+	}
+
+	// Memberships that were not announced for two intervals are removed,
+	// even if their connection stays open.
+	void cleanupStalePeers() override {
+		this->cleanupStalePeers(Clock::now());
+	}
+
+	void cleanupStalePeers(Clock::time_point now) {
+		const auto timeout = std::chrono::seconds(2 * this->options.announceInterval);
+
+		std::vector<std::pair<std::string, std::string>> stale;
+		for (const auto& [peerId, connection] : this->peers) {
+			auto it = connection->memberships.find(peerId);
+			if (it == connection->memberships.end()) {
+				continue;
+			}
+			for (const auto& [infoHash, lastAnnounce] : it->second) {
+				if (now - lastAnnounce > timeout) {
+					stale.emplace_back(peerId, infoHash);
+				}
+			}
 		}
 
-		// Remove peer from its swarms.
-		for (const auto& infoHash: peer->infoHashes) {
-			this->removePeerFromSwarm(peer, infoHash);
+		for (const auto& [peerId, infoHash] : stale) {
+			auto it = this->peers.find(peerId);
+			if (it != this->peers.end()) {
+				this->removeMembership(it->second, peerId, infoHash);
+			}
 		}
-		peer->infoHashes.clear();
+	}
 
-		// Only unregister the id if it still belongs to this peer (it may
-		// have been taken over by a newer connection with the same peer_id).
-		if (auto it = this->peers.find(peer->id); it != this->peers.end() && it->second == peer) {
-			this->peers.erase(it);
-		}
-		peer->id.clear();
+	unsigned int getCleanupPeriodMs() const override {
+		// Half an interval, so stale memberships live at most 2.5 intervals
+		return (unsigned int) std::max(1000, this->options.announceInterval * 500);
 	}
 
 private:
@@ -119,22 +151,17 @@ private:
 		return value.is_string() && Utils::binaryStringLength(value.get_ref<const std::string&>()) == 20;
 	}
 
-	// Associates a peer_id with the connection
-	void bindPeerId(PeerContext* peer, const std::string& peerId) {
-		if (peer->id.empty()) {
-			// Peer has changed of socket: detach the old one
-			if (auto it = this->peers.find(peerId); it != this->peers.end() && it->second != peer) {
-				this->disconnectPeer(it->second);
-			}
-
-			peer->id = peerId;
-			this->peers[peerId] = peer;
-		} else if (peer->id != peerId) {
-			throw TrackerException("announce: different peer_id on the same connection");
+	// Associates a peer ID with the connection. A peer ID announced on
+	// another connection moves here; other peer IDs of that connection stay.
+	void claimPeerId(PeerContext* connection, const std::string& peerId) {
+		auto it = this->peers.find(peerId);
+		if (it != this->peers.end() && it->second != connection) {
+			this->removePeerId(peerId, it->second);
 		}
+		this->peers[peerId] = connection;
 	}
 
-	void processAnnounce(const json& data, PeerContext* peer, bool completed = false) {
+	void processAnnounce(const json& data, PeerContext* connection, bool completed = false, bool paused = false) {
 		// Validate params
 		std::string infoHash = requireBinaryId(data, "info_hash");
 		std::string peerId = requireBinaryId(data, "peer_id");
@@ -144,17 +171,26 @@ private:
 			throw TrackerException("announce: offers field is not an array");
 		}
 
-		this->bindPeerId(peer, peerId);
+		// Limit checked before any state changes
+		size_t maxMemberships = this->options.maxSwarmsPerPeer;
+		if (maxMemberships > 0 && !connection->hasMembership(peerId, infoHash) && connection->membershipCount >= maxMemberships) {
+			throw TrackerException("announce: too many torrents on this connection");
+		}
+
+		this->claimPeerId(connection, peerId);
+		Swarm* swarm = this->addMembership(connection, peerId, infoHash);
 
 		auto leftIt = data.find("left");
 		bool isSeeder = completed || (leftIt != data.end() && leftIt->is_number() && *leftIt == 0);
-
-		Swarm* swarm = this->addPeerToSwarm(peer, infoHash);
-		if (isSeeder && swarm->setCompleted(peer) && completed) {
-			swarm->addDownload();
+		if (isSeeder) {
+			if (swarm->setCompleted(peerId) && completed) {
+				swarm->addDownload();
+			}
+		} else {
+			swarm->setPaused(peerId, paused);
 		}
 
-		peer->sendMessage({
+		connection->sendMessage({
 			{"action", "announce"},
 			{"interval", this->options.announceInterval},
 			{"info_hash", infoHash},
@@ -163,13 +199,14 @@ private:
 		});
 
 		if (offersIt != data.end()) {
-			this->sendOffersToPeers(data, *offersIt, swarm, peer, infoHash);
+			this->sendOffersToPeers(data, *offersIt, swarm, peerId, infoHash);
 		}
 	}
 
-	void processAnswer(const json& data, PeerContext* peer) {
+	void processAnswer(const json& data, PeerContext* connection) {
 		// Validate params
 		std::string infoHash = requireBinaryId(data, "info_hash");
+		std::string peerId = requireBinaryId(data, "peer_id");
 		std::string toPeerId = requireBinaryId(data, "to_peer_id");
 
 		const json& answer = data["answer"];
@@ -180,38 +217,39 @@ private:
 			throw TrackerException("answer: offer_id field is missing or wrong");
 		}
 
-		if (peer->id.empty()) {
-			this->bindPeerId(peer, requireBinaryId(data, "peer_id"));
+		// The sender must have announced this torrent with this peer ID on this connection
+		if (!connection->hasMembership(peerId, infoHash)) {
+			throw TrackerException("answer: peer_id is not in the swarm on this connection");
 		}
 
-		// Both peers must be in the swarm. The target may have just left,
-		// which is a normal race, so the answer is silently dropped.
+		// The target may have just left, which is a normal race, so the
+		// answer is silently dropped.
 		auto swarmIt = this->swarms.find(infoHash);
-		auto toPeerIt = this->peers.find(toPeerId);
-		if (swarmIt == this->swarms.end() || toPeerIt == this->peers.end() ||
-				!swarmIt->second->hasPeer(toPeerIt->second) || !swarmIt->second->hasPeer(peer)) {
+		const Swarm::Member* target = swarmIt == this->swarms.end() ? nullptr : swarmIt->second->findPeer(toPeerId);
+		if (target == nullptr) {
 			DOUT("answer: to_peer_id is not in the swarm");
 			return;
 		}
 
-		toPeerIt->second->sendMessage({
+		target->connection->sendMessage({
 			{"action", "announce"},
 			{"answer", {
 				{"type", "answer"},
 				{"sdp", answer["sdp"]},
 			}},
 			{"offer_id", data["offer_id"]},
-			{"peer_id", peer->id},
+			{"peer_id", peerId},
 			{"info_hash", infoHash},
 		});
 	}
 
-	void processStop(const json& data, PeerContext* peer) {
+	void processStop(const json& data, PeerContext* connection) {
 		// Validate params
 		std::string infoHash = requireBinaryId(data, "info_hash");
+		std::string peerId = requireBinaryId(data, "peer_id");
 
-		this->removePeerFromSwarm(peer, infoHash);
-		peer->infoHashes.erase(infoHash);
+		// Ignored if this connection doesn't own that membership
+		this->removeMembership(connection, peerId, infoHash);
 	}
 
 	void processScrape(const json& data, PeerContext* peer) {
@@ -225,12 +263,15 @@ private:
 					{"complete", swarm->getCompletedCount()},
 					{"incomplete", swarm->getIncompleteCount()},
 					{"downloaded", swarm->getDownloadedCount()},
+					// BEP 21
+					{"downloaders", swarm->getDownloadersCount()},
 				};
 			} else {
 				files[infoHash] = {
 					{"complete", 0},
 					{"incomplete", 0},
 					{"downloaded", 0},
+					{"downloaders", 0},
 				};
 			}
 		};
@@ -264,30 +305,62 @@ private:
 		});
 	}
 
-	Swarm* addPeerToSwarm(PeerContext* peer, const std::string& infoHash) {
-		size_t maxSwarms = this->options.maxSwarmsPerPeer;
-		if (maxSwarms > 0 && peer->infoHashes.size() >= maxSwarms && peer->infoHashes.count(infoHash) == 0) {
-			throw TrackerException("announce: too many torrents on this connection");
+	// Adds or refreshes a membership. The peer ID must belong to the connection.
+	Swarm* addMembership(PeerContext* connection, const std::string& peerId, const std::string& infoHash) {
+		auto& memberships = connection->memberships[peerId];
+		if (memberships.insert_or_assign(infoHash, Clock::now()).second) {
+			connection->membershipCount++;
 		}
 
 		auto& swarm = this->swarms[infoHash];
 		if (!swarm) {
 			swarm = std::make_unique<Swarm>(infoHash);
 		}
-
-		swarm->addPeer(peer, false);
-		peer->infoHashes.insert(infoHash);
+		swarm->addPeer(connection, peerId);
 
 		return swarm.get();
 	}
 
-	void removePeerFromSwarm(PeerContext* peer, const std::string& infoHash) {
+	// Removes a membership, and the peer ID once it has none left.
+	// Returns false if the connection doesn't own it.
+	bool removeMembership(PeerContext* connection, const std::string& peerId, const std::string& infoHash) {
+		auto it = connection->memberships.find(peerId);
+		if (it == connection->memberships.end() || it->second.erase(infoHash) == 0) {
+			return false;
+		}
+		connection->membershipCount--;
+		this->removeFromSwarm(peerId, infoHash);
+
+		if (it->second.empty()) {
+			this->removePeerId(peerId, connection);
+		}
+		return true;
+	}
+
+	// Removes a peer ID and all its memberships from a connection
+	void removePeerId(const std::string& peerId, PeerContext* connection) {
+		auto it = connection->memberships.find(peerId);
+		if (it != connection->memberships.end()) {
+			for (const auto& entry : it->second) {
+				this->removeFromSwarm(peerId, entry.first);
+			}
+			connection->membershipCount -= it->second.size();
+			connection->memberships.erase(it);
+		}
+
+		// Only unregister the id if it still belongs to this connection
+		if (auto owner = this->peers.find(peerId); owner != this->peers.end() && owner->second == connection) {
+			this->peers.erase(owner);
+		}
+	}
+
+	void removeFromSwarm(const std::string& peerId, const std::string& infoHash) {
 		auto it = this->swarms.find(infoHash);
 		if (it == this->swarms.end()) {
 			return;
 		}
 
-		it->second->removePeer(peer);
+		it->second->removePeer(peerId);
 
 		// Free up space of swarm here.
 		if (it->second->getPeersCount() == 0) {
@@ -295,7 +368,7 @@ private:
 		}
 	}
 
-	void sendOffersToPeers(const json& data, const json& offers, Swarm* swarm, PeerContext* peer, const std::string& infoHash) {
+	void sendOffersToPeers(const json& data, const json& offers, Swarm* swarm, const std::string& peerId, const std::string& infoHash) {
 		size_t count = std::min(offers.size(), (size_t) std::max(this->options.maxOffers, 0));
 
 		// Numwant (optional, clients always send one offer per wanted peer)
@@ -321,9 +394,9 @@ private:
 			}
 		}
 
-		std::vector<PeerContext*> toPeers = swarm->getRandomPeers(count, peer, this->rng);
+		std::vector<const Swarm::Member*> toPeers = swarm->getRandomPeers(count, peerId, this->rng);
 		for (size_t i = 0; i < toPeers.size(); i++) {
-			this->sendOffer(offers[i], peer->id, toPeers[i], infoHash);
+			this->sendOffer(offers[i], peerId, toPeers[i]->connection, infoHash);
 		}
 	}
 

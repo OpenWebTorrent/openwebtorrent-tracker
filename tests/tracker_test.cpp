@@ -127,8 +127,9 @@ static void testAnnounceResponse() {
 	tracker.processMessage(announce(IH1, peerId('a'), ""), &a.ctx);
 	CHECK(tracker.getSwarms().at(IH1)->getPeersCount() == 2);
 
-	// Changing peer_id on the same connection is rejected
-	CHECK(throwsTrackerException(tracker, announce(IH1, peerId('z')), &a.ctx));
+	// A second peer ID on the same connection is a separate member
+	tracker.processMessage(announce(IH1, peerId('z')), &a.ctx);
+	CHECK(tracker.getSwarms().at(IH1)->getPeersCount() == 3);
 }
 
 static void testOffersAreDistributed() {
@@ -185,20 +186,21 @@ static void testOffersAreDistributed() {
 
 static void testRandomPeersAreUniform() {
 	Swarm swarm(IH1);
-	std::vector<PeerContext> ctxs(10);
-	for (auto& c : ctxs) swarm.addPeer(&c, false);
+	PeerContext ctx;
+	for (char c = 'a'; c < 'a' + 10; c++) swarm.addPeer(&ctx, peerId(c));
 
 	std::mt19937 rng(42);
-	std::map<PeerContext*, int> hits;
+	std::map<std::string, int> hits;
 	const int rounds = 20000;
 	for (int i = 0; i < rounds; i++) {
-		auto picked = swarm.getRandomPeers(3, &ctxs[4], rng);
+		auto picked = swarm.getRandomPeers(3, peerId('e'), rng);
 		CHECK(picked.size() == 3);
-		std::set<PeerContext*> unique(picked.begin(), picked.end());
+		std::set<std::string> unique;
+		for (auto* p : picked) unique.insert(p->peerId);
 		CHECK(unique.size() == 3);
-		for (auto* p : picked) hits[p]++;
+		for (auto* p : picked) hits[p->peerId]++;
 	}
-	CHECK(hits.count(&ctxs[4]) == 0);
+	CHECK(hits.count(peerId('e')) == 0);
 	// Expected hits per peer: rounds * 3 / 9 ~= 6667
 	for (const auto& entry : hits) {
 		CHECK(entry.second > 6000 && entry.second < 7300);
@@ -249,7 +251,8 @@ static void testReconnectWithSamePeerId() {
 	tracker.processMessage(announce(IH1, peerId('a')), &a1->ctx);
 	tracker.processMessage(announce(IH1, peerId('a')), &a2.ctx);
 	CHECK(tracker.getSwarms().at(IH1)->getPeersCount() == 1);
-	CHECK(tracker.getSwarms().at(IH1)->hasPeer(&a2.ctx));
+	CHECK(tracker.getSwarms().at(IH1)->findPeer(peerId('a'))->connection == &a2.ctx);
+	CHECK(a1->ctx.memberships.empty());
 
 	// Old socket closes afterwards: must not unregister the new connection
 	tracker.disconnectPeer(&a1->ctx);
@@ -284,7 +287,7 @@ static void testStopAndDisconnectCleanUp() {
 	// Stop the only peer of IH2: swarm is freed (it used to leak)
 	tracker.processMessage(announce(IH2, peerId('a'), "stopped"), &a.ctx);
 	CHECK(tracker.getSwarms().count(IH2) == 0);
-	CHECK(a.ctx.infoHashes.count(IH2) == 0);
+	CHECK(!a.ctx.hasMembership(peerId('a'), IH2));
 
 	// Stopping a torrent the peer never joined does nothing
 	tracker.processMessage(announce(IH2, peerId('a'), "stopped"), &a.ctx);
@@ -294,7 +297,8 @@ static void testStopAndDisconnectCleanUp() {
 
 	tracker.disconnectPeer(&a.ctx);
 	CHECK(tracker.getSwarms().at(IH1)->getPeersCount() == 1);
-	CHECK(a.ctx.id.empty());
+	CHECK(a.ctx.memberships.empty());
+	CHECK(a.ctx.membershipCount == 0);
 	tracker.disconnectPeer(&b.ctx);
 	CHECK(tracker.getSwarms().empty());
 }
@@ -365,7 +369,11 @@ static void testLimits() {
 	tracker.processMessage(announce(std::string(20, 'a'), peerId('a'), ""), &a.ctx);
 	tracker.processMessage(announce(std::string(20, 'a'), peerId('a'), "stopped"), &a.ctx);
 	tracker.processMessage(announce(std::string(20, 'd'), peerId('a')), &a.ctx);
-	CHECK(a.ctx.infoHashes.size() == 3);
+	CHECK(a.ctx.membershipCount == 3);
+
+	// The limit counts memberships across all peer IDs of a connection
+	CHECK(throwsTrackerException(tracker, announce(std::string(20, 'e'), peerId('b')), &a.ctx));
+	CHECK(a.ctx.memberships.count(peerId('b')) == 0);
 
 	// Full scrape is disabled by default, scrape lists are capped
 	CHECK(throwsTrackerException(tracker, {{"action", "scrape"}}, &a.ctx));
@@ -405,6 +413,176 @@ static void testAddressKey() {
 	CHECK(Utils::addressKeyFromText("").empty());
 }
 
+static json answerMessage(const std::string& infoHash, const std::string& from, const std::string& to, const std::string& sdp) {
+	return {
+		{"action", "announce"}, {"info_hash", infoHash}, {"peer_id", from}, {"to_peer_id", to},
+		{"offer_id", "o0"}, {"answer", {{"type", "answer"}, {"sdp", sdp}}}
+	};
+}
+
+static size_t answersWithSdp(const FakePeer& peer, const std::string& sdp) {
+	size_t count = 0;
+	for (const auto& m : peer.inbox) {
+		count += m.contains("answer") && m["answer"]["sdp"] == sdp;
+	}
+	return count;
+}
+
+static size_t incomplete(FastTracker& tracker, const std::string& infoHash) {
+	auto it = tracker.getSwarms().find(infoHash);
+	return it == tracker.getSwarms().end() ? 0 : it->second->getIncompleteCount();
+}
+
+// libtorrent shares one connection between torrents with different peer IDs (#17)
+static void testMultiplePeerIdsPerConnection() {
+	FastTracker tracker;
+	FakePeer shared, b, c;
+
+	tracker.processMessage(announce(IH1, peerId('x')), &shared.ctx);
+	tracker.processMessage(announce(IH2, peerId('y')), &shared.ctx);
+	CHECK(shared.inbox.size() == 2);
+	CHECK(shared.ctx.memberships.size() == 2);
+
+	// Offers and answers route by peer ID
+	tracker.processMessage(announce(IH1, peerId('b'), "started", 1), &b.ctx);
+	CHECK(countOffers(shared) == 1);
+	tracker.processMessage(answerMessage(IH1, peerId('x'), peerId('b'), "s1"), &shared.ctx);
+	CHECK(answersWithSdp(b, "s1") == 1);
+
+	// The answer must come from a peer ID this connection announced in that swarm
+	CHECK(throwsTrackerException(tracker, answerMessage(IH1, peerId('y'), peerId('b'), "s2"), &shared.ctx));
+	CHECK(throwsTrackerException(tracker, answerMessage(IH1, peerId('x'), peerId('b'), "s2"), &c.ctx));
+	CHECK(answersWithSdp(b, "s2") == 0);
+
+	// Target left: dropped without error, the shared connection keeps its other torrents
+	tracker.disconnectPeer(&b.ctx);
+	CHECK(!throwsTrackerException(tracker, answerMessage(IH1, peerId('x'), peerId('b'), "s3"), &shared.ctx));
+	CHECK(incomplete(tracker, IH2) == 1);
+
+	// Two peer IDs of one connection in the same swarm are distinct members
+	tracker.processMessage(announce(IH2, peerId('z')), &shared.ctx);
+	CHECK(incomplete(tracker, IH2) == 2);
+	// They are different peers, so they get offers from each other
+	tracker.processMessage(announce(IH2, peerId('z'), "", 1), &shared.ctx);
+	CHECK(countOffers(shared) == 2);
+	CHECK(shared.inbox.back()["peer_id"] == peerId('z'));
+
+	// Stopping one identity keeps the other
+	tracker.processMessage(announce(IH2, peerId('z'), "stopped"), &shared.ctx);
+	CHECK(incomplete(tracker, IH2) == 1);
+	CHECK(shared.ctx.memberships.count(peerId('z')) == 0);
+
+	// Another connection cannot stop a membership it doesn't own
+	tracker.processMessage(announce(IH2, peerId('y'), "stopped"), &c.ctx);
+	CHECK(incomplete(tracker, IH2) == 1);
+
+	// Takeover moves one peer ID with all its memberships, nothing else
+	tracker.processMessage(announce(IH1, peerId('y')), &shared.ctx);
+	tracker.processMessage(announce(IH2, peerId('y')), &c.ctx);
+	CHECK(incomplete(tracker, IH1) == 1);  // only x left in IH1
+	CHECK(incomplete(tracker, IH2) == 1);  // y, now on c
+	CHECK(tracker.getSwarms().at(IH2)->findPeer(peerId('y'))->connection == &c.ctx);
+	CHECK(shared.ctx.memberships.count(peerId('y')) == 0);
+	CHECK(shared.ctx.membershipCount == 1);
+
+	// The old connection closing doesn't affect the moved peer ID
+	tracker.disconnectPeer(&shared.ctx);
+	CHECK(tracker.getSwarms().count(IH1) == 0);
+	CHECK(incomplete(tracker, IH2) == 1);
+	tracker.disconnectPeer(&c.ctx);
+	CHECK(tracker.getSwarms().empty());
+}
+
+static void testPausedPartialSeeds() {
+	TrackerOptions options;
+	options.allowFullScrape = true;
+	FastTracker tracker(options);
+	FakePeer seed, partial, observer;
+
+	json seedAnnounce = announce(IH1, peerId('s'));
+	seedAnnounce["left"] = 0;
+	tracker.processMessage(seedAnnounce, &seed.ctx);
+
+	// BEP 21: a partial seed announces with event=paused, even the first time
+	tracker.processMessage(announce(IH1, peerId('p'), "paused", 1), &partial.ctx);
+	CHECK(partial.inbox.back()["complete"] == 1);
+	CHECK(partial.inbox.back()["incomplete"] == 1);
+	CHECK(countOffers(seed) == 1);
+
+	auto scrapeFile = [&]() {
+		tracker.processMessage({{"action", "scrape"}, {"info_hash", IH1}}, &observer.ctx);
+		return observer.inbox.back()["files"][IH1];
+	};
+	CHECK(scrapeFile()["downloaders"] == 0);
+	CHECK(scrapeFile()["incomplete"] == 1);
+
+	// Any other announce means it is downloading again
+	tracker.processMessage(announce(IH1, peerId('p'), ""), &partial.ctx);
+	CHECK(scrapeFile()["downloaders"] == 1);
+	tracker.processMessage(announce(IH1, peerId('p'), "paused"), &partial.ctx);
+	CHECK(scrapeFile()["downloaders"] == 0);
+
+	// An answer sent with event=paused is still an answer
+	tracker.processMessage([&] {
+		json a = answerMessage(IH1, peerId('p'), peerId('s'), "to-seed");
+		a["event"] = "paused";
+		return a;
+	}(), &partial.ctx);
+	CHECK(answersWithSdp(seed, "to-seed") == 1);
+
+	// Paused -> completed counts one download, and seeders are never paused
+	tracker.processMessage(announce(IH1, peerId('p'), "completed"), &partial.ctx);
+	json file = scrapeFile();
+	CHECK(file["complete"] == 2);
+	CHECK(file["incomplete"] == 0);
+	CHECK(file["downloaders"] == 0);
+	CHECK(file["downloaded"] == 1);
+	tracker.processMessage(announce(IH1, peerId('p'), "paused"), &partial.ctx);
+	CHECK(scrapeFile()["complete"] == 2);
+
+	// Unknown hashes and full scrape include the BEP 21 field
+	tracker.processMessage({{"action", "scrape"}, {"info_hash", {IH2}}}, &observer.ctx);
+	CHECK(observer.inbox.back()["files"][IH2]["downloaders"] == 0);
+	tracker.processMessage({{"action", "scrape"}}, &observer.ctx);
+	CHECK(observer.inbox.back()["files"][IH1].contains("downloaders"));
+
+	// Stopping a paused peer clears its state
+	tracker.processMessage(announce(IH2, peerId('q'), "paused"), &partial.ctx);
+	tracker.processMessage(announce(IH2, peerId('q'), "stopped"), &partial.ctx);
+	CHECK(tracker.getSwarms().count(IH2) == 0);
+}
+
+static void testStaleMembershipsExpire() {
+	FastTracker tracker(20, 10);  // 10s interval: memberships expire after 20s
+	FakePeer a, b;
+
+	tracker.processMessage(announce(IH1, peerId('a')), &a.ctx);
+	tracker.processMessage(announce(IH2, peerId('a')), &a.ctx);
+	tracker.processMessage(announce(IH1, peerId('b')), &b.ctx);
+
+	auto now = std::chrono::steady_clock::now();
+	tracker.cleanupStalePeers(now + std::chrono::seconds(15));
+	CHECK(tracker.getSwarms().size() == 2);
+
+	// Refreshing one membership keeps it while the other expires
+	auto& refreshed = a.ctx.memberships[peerId('a')][IH2];
+	refreshed = now + std::chrono::seconds(15);
+	tracker.cleanupStalePeers(now + std::chrono::seconds(25));
+	CHECK(tracker.getSwarms().count(IH1) == 0);
+	CHECK(incomplete(tracker, IH2) == 1);
+	CHECK(a.ctx.membershipCount == 1);
+	CHECK(b.ctx.memberships.empty());
+
+	// A peer ID whose last membership expired is unregistered: re-announcing works
+	tracker.cleanupStalePeers(now + std::chrono::seconds(40));
+	CHECK(tracker.getSwarms().empty());
+	CHECK(a.ctx.memberships.empty());
+	tracker.processMessage(announce(IH1, peerId('a')), &a.ctx);
+	CHECK(incomplete(tracker, IH1) == 1);
+
+	CHECK(tracker.getCleanupPeriodMs() == 5000);
+}
+
 int main() {
 	testMalformedInputNeverCrashes();
 	testAnnounceResponse();
@@ -418,6 +596,9 @@ int main() {
 	testLimits();
 	testTokenBucket();
 	testAddressKey();
+	testMultiplePeerIdsPerConnection();
+	testPausedPartialSeeds();
+	testStaleMembershipsExpire();
 
 	if (failures) {
 		std::cerr << failures << " check(s) failed" << std::endl;

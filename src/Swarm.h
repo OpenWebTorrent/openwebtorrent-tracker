@@ -15,12 +15,21 @@ namespace owt {
 
 class Swarm {
 
+public:
+	// A swarm member is a peer ID on a connection
+	struct Member {
+		PeerContext* connection;
+		std::string peerId;
+	};
+
 private:
 	std::string infoHash;
 	// Dense vector for O(1) random access, plus an index for O(1) removal.
-	std::vector<PeerContext*> peers;
-	std::unordered_map<PeerContext*, size_t> peerIndices;
-	std::unordered_set<PeerContext*> completedPeers;
+	std::vector<Member> peers;
+	std::unordered_map<std::string, size_t> peerIndices;
+	std::unordered_set<std::string> completedPeers;
+	// BEP 21 partial seeds: incomplete, but not downloading
+	std::unordered_set<std::string> pausedPeers;
 	uint64_t downloadedCount = 0;
 
 public:
@@ -42,74 +51,107 @@ public:
 		return this->peers.size() - this->completedPeers.size();
 	}
 
+	// Incomplete peers that are not BEP 21 partial seeds
+	size_t getDownloadersCount() const {
+		return this->getIncompleteCount() - this->pausedPeers.size();
+	}
+
 	uint64_t getDownloadedCount() const {
 		return this->downloadedCount;
 	}
 
-	const std::vector<PeerContext*>& getPeers() const {
+	const std::vector<Member>& getPeers() const {
 		return this->peers;
 	}
 
-	bool hasPeer(PeerContext* peer) const {
-		return this->peerIndices.count(peer) > 0;
+	const Member* findPeer(const std::string& peerId) const {
+		auto it = this->peerIndices.find(peerId);
+		return it == this->peerIndices.end() ? nullptr : &this->peers[it->second];
 	}
 
-	bool isCompleted(PeerContext* peer) const {
-		return this->completedPeers.count(peer) > 0;
+	bool hasPeer(const std::string& peerId) const {
+		return this->peerIndices.count(peerId) > 0;
 	}
 
-	void addPeer(PeerContext* peer, bool completed) {
-		if (this->peerIndices.emplace(peer, this->peers.size()).second) {
-			this->peers.push_back(peer);
+	bool isCompleted(const std::string& peerId) const {
+		return this->completedPeers.count(peerId) > 0;
+	}
+
+	bool isPaused(const std::string& peerId) const {
+		return this->pausedPeers.count(peerId) > 0;
+	}
+
+	void addPeer(PeerContext* connection, const std::string& peerId) {
+		auto [it, inserted] = this->peerIndices.emplace(peerId, this->peers.size());
+		if (inserted) {
+			this->peers.push_back({connection, peerId});
+		} else {
+			this->peers[it->second].connection = connection;
 		}
-		if (completed) {
-			this->completedPeers.insert(peer);
-		}
 	}
 
-	void removePeer(PeerContext* peer) {
-		auto it = this->peerIndices.find(peer);
+	void removePeer(const std::string& peerId) {
+		auto it = this->peerIndices.find(peerId);
 		if (it == this->peerIndices.end()) {
 			return;
 		}
 
 		// Swap with the last peer and pop
 		size_t index = it->second;
-		PeerContext* last = this->peers.back();
-		this->peers[index] = last;
-		this->peerIndices[last] = index;
+		this->peerIndices.erase(it);
+		if (index != this->peers.size() - 1) {
+			this->peers[index] = std::move(this->peers.back());
+			this->peerIndices[this->peers[index].peerId] = index;
+		}
 		this->peers.pop_back();
-		this->peerIndices.erase(peer);
 
-		this->completedPeers.erase(peer);
+		this->completedPeers.erase(peerId);
+		this->pausedPeers.erase(peerId);
 	}
 
 	// Marks a peer as seeder. Returns true if it was not one before.
-	bool setCompleted(PeerContext* peer) {
-		return this->completedPeers.insert(peer).second;
+	bool setCompleted(const std::string& peerId) {
+		if (!this->hasPeer(peerId)) {
+			return false;
+		}
+		this->pausedPeers.erase(peerId);
+		return this->completedPeers.insert(peerId).second;
+	}
+
+	// BEP 21: a partial seed announces with event=paused, any other announce
+	// means it is downloading again. Seeders stay seeders.
+	void setPaused(const std::string& peerId, bool paused) {
+		if (!this->hasPeer(peerId) || this->isCompleted(peerId)) {
+			return;
+		}
+		if (paused) {
+			this->pausedPeers.insert(peerId);
+		} else {
+			this->pausedPeers.erase(peerId);
+		}
 	}
 
 	void addDownload() {
 		this->downloadedCount++;
 	}
 
-	// Uniformly picks `count` distinct peers, never including `exclude`.
+	// Uniformly picks `count` distinct members, never including `excludePeerId`.
 	template <class URBG>
-	std::vector<PeerContext*> getRandomPeers(size_t count, PeerContext* exclude, URBG& rng) const {
-		auto excludeIt = this->peerIndices.find(exclude);
+	std::vector<const Member*> getRandomPeers(size_t count, const std::string& excludePeerId, URBG& rng) const {
+		auto excludeIt = this->peerIndices.find(excludePeerId);
 		bool hasExclude = excludeIt != this->peerIndices.end();
 		size_t candidates = this->peers.size() - (hasExclude ? 1 : 0);
 		count = std::min(count, candidates);
 
-		// Maps a slot in [0, candidates) to an index in peers, skipping `exclude`
+		// Maps a slot in [0, candidates) to an index in peers, skipping the excluded one
 		auto toPeer = [&](size_t slot) {
 			if (hasExclude && slot >= excludeIt->second) {
 				slot++;
 			}
-			return this->peers[slot];
+			return &this->peers[slot];
 		};
 
-		std::vector<PeerContext*> result;
+		std::vector<const Member*> result;
 		result.reserve(count);
 
 		if (count == candidates) {
