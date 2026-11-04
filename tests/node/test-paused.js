@@ -239,6 +239,10 @@ async function main() {
       info_hash: infoHash,
       peer_id: partialId,
     });
+    // Barrier: messages on one connection are processed in order, but not
+    // across connections (the tracker is multi-threaded). A reply on the
+    // stopping connection proves the stop was applied.
+    await scrapeFile(partial, infoHash);
     let scrapeCountBefore = observer.messages.filter(
       message => message.action === 'scrape' && message.files && message.files[infoHash]
     ).length;
@@ -349,6 +353,7 @@ async function main() {
       assert.equal(allFiles[hashB].downloaders, 1, 'all-swarms scrape should count active peers');
 
       send(multi, { action: 'announce', event: 'stopped', info_hash: hashA, peer_id: multiId });
+      await scrapeFile(multi, hashA); // barrier, see above
       a = await scrapeFile(observer, hashA);
       b = await scrapeFile(observer, hashB);
       assert.deepEqual([a.complete, a.incomplete, a.downloaders], [0, 0, 0],

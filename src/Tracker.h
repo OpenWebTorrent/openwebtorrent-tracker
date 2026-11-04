@@ -37,11 +37,30 @@ public:
 	virtual void disconnectPeer(PeerContext* peer) = 0;
 
 	virtual const SwarmMap& getSwarms() const = 0;
+	// Distinct peer IDs currently in at least one swarm
+	virtual size_t getPeerIdCount() const { return 0; }
+
+	// Totals over all swarms. The defaults walk every swarm; FastTracker keeps
+	// running counters so these are O(1) (they're read under the server lock).
+	virtual size_t getMembershipCount() const {
+		size_t count = 0;
+		for (const auto& entry : this->getSwarms()) count += entry.second->getPeersCount();
+		return count;
+	}
+	virtual size_t getSeederCount() const {
+		size_t count = 0;
+		for (const auto& entry : this->getSwarms()) count += entry.second->getCompletedCount();
+		return count;
+	}
 
 	// Called periodically: removes memberships that stopped announcing
 	virtual void cleanupStalePeers() {}
 	// How often cleanupStalePeers should run, in milliseconds (0 = never)
 	virtual unsigned int getCleanupPeriodMs() const { return 0; }
+	// One slice of an incremental cleanup: a full sweep takes `slices` calls.
+	// Lets a multi-threaded server release its lock between slices instead of
+	// stalling every thread for one long scan.
+	virtual void cleanupStalePeersStep(unsigned int slices) { this->cleanupStalePeers(); }
 
 };
 

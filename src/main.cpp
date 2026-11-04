@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <exception>
 #include <iostream>
 #include <cxxopts.hpp>
@@ -14,6 +15,7 @@ int main(int argc, char** argv) {
 		("k,ssl-key", "SSL key", cxxopts::value<std::string>()->default_value("./localhost-key.pem"))
 		("c,ssl-cert", "SSL certificate", cxxopts::value<std::string>()->default_value("./localhost.pem"))
 		("no-ssl", "Serve plain websockets (e.g. behind a TLS-terminating proxy)")
+		("t,threads", "Worker threads (0 = one per CPU core; default: $OWT_THREADS or 0)", cxxopts::value<unsigned int>()->default_value("0"))
 		("trust-proxy", "Use X-Forwarded-For as client address (only behind a reverse proxy)")
 		("max-connections-per-ip", "Max connections per IPv4 address or IPv6 /64 (0 = unlimited)", cxxopts::value<size_t>()->default_value("0"))
 		("rate-limit", "Max messages per second per connection (0 = unlimited)", cxxopts::value<double>()->default_value("50"))
@@ -50,6 +52,20 @@ int main(int argc, char** argv) {
 		owt::ServerOptions serverOptions;
 		serverOptions.port = port;
 		serverOptions.host = result["host"].as<std::string>();
+		serverOptions.threads = result["threads"].as<unsigned int>();
+		// Environment fallback, so a service file can set threads without breaking
+		// older binaries that don't know --threads (they ignore the variable)
+		if (!result.count("threads")) {
+			if (const char* env = std::getenv("OWT_THREADS"); env != nullptr && *env != '\0') {
+				char* end = nullptr;
+				unsigned long value = std::strtoul(env, &end, 10);
+				if (end == env || *end != '\0' || value > 1024) {
+					std::cerr << "OWT_THREADS must be a number between 0 and 1024" << std::endl;
+					return 1;
+				}
+				serverOptions.threads = (unsigned int) value;
+			}
+		}
 
 		// Key & Cert
 		if (!result.count("no-ssl")) {

@@ -46,6 +46,7 @@ You can run it with the command below:
 | `-k, --ssl-key` | `./localhost-key.pem` | SSL private key |
 | `-c, --ssl-cert` | `./localhost.pem` | SSL certificate |
 | `--no-ssl` | | Serve plain `ws://`, e.g. behind a TLS-terminating reverse proxy |
+| `-t, --threads` | `0` | Worker threads; `0` = one per CPU core. Falls back to the `OWT_THREADS` environment variable |
 | `--announce-interval` | `120` | Announce interval sent to clients, in seconds. Peers that don't announce for 2 intervals are dropped |
 | `-d, --debug` | | Log every message |
 
@@ -65,7 +66,23 @@ address: pass `--trust-proxy` (and make sure the proxy sets `X-Forwarded-For`)
 before enabling `--max-connections-per-ip`. Never use `--trust-proxy` when the
 tracker is directly reachable, since clients could then forge their address.
 
-Tracker stats are available at `/stats.json`.
+### Monitoring
+
+| Path | Description |
+| --- | --- |
+| `/status` | Status page: health checks, current values and charts (connections, peers, messages, CPU per thread, lock contention, churn, rejected traffic, bandwidth, memory) |
+| `/stats.json` | Torrent, peer and connection counts, computed live (original format) |
+| `/stats/metrics.json` | Current metrics, refreshed every 5 seconds |
+| `/stats/history.json?range=15m\|1h\|6h\|24h\|7d` | Metric history for charts. Kept in memory: 5-second samples for 1 hour, 1-minute samples for 7 days |
+
+### Threads
+
+One thread accepts connections and hands them round robin to the worker
+threads, each with its own event loop. Workers parse, serialize and send in
+parallel; the shared tracker state (swarms, peer IDs) is protected by a single
+lock held only while it's updated. Messages for a peer on another thread are
+handed to that thread's loop. Messages on one connection are processed in
+order; messages on different connections have no ordering guarantee.
 
 ### Protocol notes
 

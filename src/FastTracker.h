@@ -46,6 +46,18 @@ public:
 		return this->swarms;
 	}
 
+	size_t getPeerIdCount() const override {
+		return this->peers.size();
+	}
+
+	size_t getMembershipCount() const override {
+		return this->membershipTotal;
+	}
+
+	size_t getSeederCount() const override {
+		return this->seederTotal;
+	}
+
 	void processMessage(const json& data, PeerContext* peer) override {
 		if (!data.is_object()) {
 			throw TrackerException("message must be a JSON object");
@@ -96,27 +108,37 @@ public:
 	}
 
 	void cleanupStalePeers(Clock::time_point now) {
-		const auto timeout = std::chrono::seconds(2 * this->options.announceInterval);
-
 		std::vector<std::pair<std::string, std::string>> stale;
 		for (const auto& [peerId, connection] : this->peers) {
-			auto it = connection->memberships.find(peerId);
-			if (it == connection->memberships.end()) {
-				continue;
-			}
-			for (const auto& [infoHash, lastAnnounce] : it->second) {
-				if (now - lastAnnounce > timeout) {
-					stale.emplace_back(peerId, infoHash);
-				}
-			}
+			this->collectStale(peerId, connection, now, stale);
 		}
+		this->removeStale(stale);
+	}
 
-		for (const auto& [peerId, infoHash] : stale) {
-			auto it = this->peers.find(peerId);
-			if (it != this->peers.end()) {
-				this->removeMembership(it->second, peerId, infoHash);
+	void cleanupStalePeersStep(unsigned int slices) override {
+		this->cleanupStalePeersStep(Clock::now(), slices);
+	}
+
+	// Scans the next 1/slices of the peer table's buckets. Bucket iterators
+	// stay valid across calls as long as the table isn't rehashed; if it was,
+	// the sweep restarts (rehashes are rare: the table only grows by doubling).
+	void cleanupStalePeersStep(Clock::time_point now, unsigned int slices) {
+		size_t buckets = this->peers.bucket_count();
+		if (buckets != this->cleanupBuckets) {
+			this->cleanupBuckets = buckets;
+			this->cleanupCursor = 0;
+		}
+		size_t perStep = (buckets + std::max(1u, slices) - 1) / std::max(1u, slices);
+		size_t end = std::min(buckets, this->cleanupCursor + perStep);
+
+		std::vector<std::pair<std::string, std::string>> stale;
+		for (size_t bucket = this->cleanupCursor; bucket < end; bucket++) {
+			for (auto it = this->peers.begin(bucket); it != this->peers.end(bucket); ++it) {
+				this->collectStale(it->first, it->second, now, stale);
 			}
 		}
+		this->cleanupCursor = end >= buckets ? 0 : end;
+		this->removeStale(stale);
 	}
 
 	unsigned int getCleanupPeriodMs() const override {
@@ -125,6 +147,36 @@ public:
 	}
 
 private:
+
+	// Running totals over all swarms (see getMembershipCount)
+	size_t membershipTotal = 0;
+	size_t seederTotal = 0;
+
+	// Incremental cleanup position (bucket index) and the bucket count it refers to
+	size_t cleanupCursor = 0;
+	size_t cleanupBuckets = 0;
+
+	void collectStale(const std::string& peerId, PeerContext* connection, Clock::time_point now, std::vector<std::pair<std::string, std::string>>& stale) const {
+		const auto timeout = std::chrono::seconds(2 * this->options.announceInterval);
+		auto it = connection->memberships.find(peerId);
+		if (it == connection->memberships.end()) {
+			return;
+		}
+		for (const auto& [infoHash, lastAnnounce] : it->second) {
+			if (now - lastAnnounce > timeout) {
+				stale.emplace_back(peerId, infoHash);
+			}
+		}
+	}
+
+	void removeStale(const std::vector<std::pair<std::string, std::string>>& stale) {
+		for (const auto& [peerId, infoHash] : stale) {
+			auto it = this->peers.find(peerId);
+			if (it != this->peers.end()) {
+				this->removeMembership(it->second, peerId, infoHash);
+			}
+		}
+	}
 
 	// Returns the string value of an optional field, "" if missing or null
 	static std::string optionalString(const json& data, const char* key) {
@@ -183,8 +235,11 @@ private:
 		auto leftIt = data.find("left");
 		bool isSeeder = completed || (leftIt != data.end() && leftIt->is_number() && *leftIt == 0);
 		if (isSeeder) {
-			if (swarm->setCompleted(peerId) && completed) {
-				swarm->addDownload();
+			if (swarm->setCompleted(peerId)) {
+				this->seederTotal++;
+				if (completed) {
+					swarm->addDownload();
+				}
 			}
 		} else {
 			swarm->setPaused(peerId, paused);
@@ -231,16 +286,7 @@ private:
 			return;
 		}
 
-		target->connection->sendMessage({
-			{"action", "announce"},
-			{"answer", {
-				{"type", "answer"},
-				{"sdp", answer["sdp"]},
-			}},
-			{"offer_id", data["offer_id"]},
-			{"peer_id", peerId},
-			{"info_hash", infoHash},
-		});
+		target->connection->relayAnswer(data, peerId, infoHash);
 	}
 
 	void processStop(const json& data, PeerContext* connection) {
@@ -316,7 +362,9 @@ private:
 		if (!swarm) {
 			swarm = std::make_unique<Swarm>(infoHash);
 		}
+		size_t before = swarm->getPeersCount();
 		swarm->addPeer(connection, peerId);
+		this->membershipTotal += swarm->getPeersCount() - before;
 
 		return swarm.get();
 	}
@@ -360,7 +408,11 @@ private:
 			return;
 		}
 
+		size_t peersBefore = it->second->getPeersCount();
+		size_t seedersBefore = it->second->getCompletedCount();
 		it->second->removePeer(peerId);
+		this->membershipTotal -= peersBefore - it->second->getPeersCount();
+		this->seederTotal -= seedersBefore - it->second->getCompletedCount();
 
 		// Free up space of swarm here.
 		if (it->second->getPeersCount() == 0) {
@@ -401,16 +453,7 @@ private:
 	}
 
 	void sendOffer(const json& offerItem, const std::string& fromPeerId, PeerContext* toPeer, const std::string& infoHash) {
-		toPeer->sendMessage({
-			{"action", "announce"},
-			{"info_hash", infoHash},
-			{"offer_id", offerItem["offer_id"]},
-			{"peer_id", fromPeerId},
-			{"offer", {
-				{"type", "offer"},
-				{"sdp", offerItem["offer"]["sdp"]},
-			}}
-		});
+		toPeer->relayOffer(offerItem, fromPeerId, infoHash);
 	}
 
 };

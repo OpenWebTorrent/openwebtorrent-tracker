@@ -1,27 +1,32 @@
 #ifndef OWT_WEBTORRENT_TRACKER_H
 #define OWT_WEBTORRENT_TRACKER_H
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdlib>
 #include <exception>
-#include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include <json.hpp>
 #include <App.h>
-#include <sys/resource.h>
-#include <sys/time.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
 #include "Utils.h"
 #include "Swarm.h"
 #include "Tracker.h"
 #include "FastTracker.h"
 #include "DataObject.h"
+#include "Metrics.h"
 #include "PeerContext.h"
+#include "StatusPage.h"
 #include "TrackerException.h"
 
 using namespace nlohmann;
@@ -37,6 +42,9 @@ struct ServerOptions {
 	std::string keyFile;
 	std::string certFile;
 
+	// Worker threads handling connections (0 = one per CPU core)
+	unsigned int threads = 0;
+
 	// Take the client address from X-Forwarded-For (only behind a reverse proxy)
 	bool trustProxy = false;
 	// Maximum simultaneous connections per IPv4 address or IPv6 /64 (0 = unlimited)
@@ -49,14 +57,38 @@ struct ServerOptions {
 	TrackerOptions tracker;
 };
 
+// Threading model
+// ---------------
+// The acceptor (the thread calling run()) owns the listening socket and hands
+// each accepted connection, round robin, to one of N worker threads, each with
+// its own uWS event loop. Workers do the expensive part in parallel: HTTP,
+// websocket framing, JSON parsing and serialization, socket I/O.
+//
+// The tracker state (swarms, peer IDs) is shared and guarded by one mutex,
+// held only while the tracker updates its maps. Messages the tracker produces
+// meanwhile are queued (PeerContext::outbox) and delivered after the lock is
+// released: directly when the target socket belongs to the current thread,
+// otherwise batched and deferred to the owning thread's loop. Delivery looks
+// the connection up by id in that thread's registry, so a connection that
+// closed in the meantime is skipped instead of touched after free.
 class WebtorrentTracker {
 
 private:
 	ServerOptions options;
 
-	size_t websocketCount = 0;
-	std::unordered_map<std::string, size_t> connectionsPerAddress;
 	std::unique_ptr<Tracker> tracker;
+	std::mutex trackerMutex;
+	// Guarded by trackerMutex; only maintained when maxConnectionsPerIp > 0
+	std::unordered_map<std::string, size_t> connectionsPerAddress;
+
+	std::atomic<uint64_t> nextConnectionId{1};
+	Metrics metrics;
+
+	static constexpr unsigned int CLEANUP_SLICES = 64;
+
+	// Per worker thread
+	static inline thread_local std::unordered_map<uint64_t, void*> localSockets;
+	static inline thread_local WorkerCounters* localCounters = nullptr;
 
 public:
 
@@ -76,34 +108,25 @@ public:
 	WebtorrentTracker(std::string host) : WebtorrentTracker(0, host, "", "") {}
 
 	void run() {
-		// TODO: add threads
-
 		if (this->options.keyFile.empty() && this->options.certFile.empty()) {
-			uWS::App app;
-			this->runApp<false>(app);
+			this->runServer<false>();
 			return;
 		}
 
-		// Check if files exists
 		bool exists = this->fileExists(this->options.keyFile) && this->fileExists(this->options.certFile);
 		if (!exists) {
 			throw std::runtime_error("Cert and key must exist");
 		}
-
-		uWS::SSLApp app({
-			.key_file_name = this->options.keyFile.c_str(),
-			.cert_file_name = this->options.certFile.c_str()
-		});
-		if (app.constructorFailed()) {
-			throw std::runtime_error("Failed to load SSL key or certificate");
-		}
-		this->runApp<true>(app);
+		this->runServer<true>();
 	}
 
 private:
 
 	template <bool SSL>
 	using WebSocket = uWS::WebSocket<SSL, true, PeerContext>;
+
+	template <bool SSL>
+	using App = uWS::TemplatedApp<SSL>;
 
 	static ServerOptions makeOptions(int port, std::string host, std::string keyFile, std::string certFile) {
 		ServerOptions options;
@@ -114,8 +137,148 @@ private:
 		return options;
 	}
 
+	unsigned int threadCount() const {
+		if (this->options.threads > 0) {
+			return this->options.threads;
+		}
+		return std::max(1u, std::thread::hardware_concurrency());
+	}
+
 	template <bool SSL>
-	void runApp(uWS::TemplatedApp<SSL>& app) {
+	std::unique_ptr<App<SSL>> makeApp() {
+		if constexpr (SSL) {
+			auto app = std::make_unique<App<SSL>>(uWS::SocketContextOptions{
+				.key_file_name = this->options.keyFile.c_str(),
+				.cert_file_name = this->options.certFile.c_str()
+			});
+			if (app->constructorFailed()) {
+				throw std::runtime_error("Failed to load SSL key or certificate");
+			}
+			return app;
+		} else {
+			return std::make_unique<App<SSL>>();
+		}
+	}
+
+	template <bool SSL>
+	void runServer() {
+		const unsigned int threads = this->threadCount();
+		this->metrics.init(threads);
+		this->metrics.acceptorTid = Metrics::currentTid();
+		this->metrics.config = {
+			{"threads", threads},
+			{"announceInterval", this->options.tracker.announceInterval},
+			{"rateLimit", this->options.messageRate},
+			{"rateBurst", this->options.messageBurst},
+			{"maxTorrentsPerConnection", this->options.tracker.maxSwarmsPerPeer},
+			{"maxConnectionsPerIp", this->options.maxConnectionsPerIp},
+			{"allowFullScrape", this->options.tracker.allowFullScrape},
+			{"trustProxy", this->options.trustProxy},
+			{"ssl", SSL}
+		};
+
+		// Listen before starting workers: a failure here exits cleanly.
+		// Exclusive port: with SO_REUSEPORT a second instance would silently split the swarms.
+		std::unique_ptr<App<SSL>> acceptor = this->makeApp<SSL>();
+		bool listening = false;
+		acceptor->listen(this->options.host, this->options.port, LIBUS_LISTEN_EXCLUSIVE_PORT, [&listening](auto* token) {
+			listening = token != nullptr;
+		});
+		if (!listening) {
+			throw std::runtime_error("Failed to listen on " + this->getAddress());
+		}
+
+		// Start workers and wait until each has created its app
+		std::vector<App<SSL>*> apps(threads, nullptr);
+		std::mutex readyMutex;
+		std::condition_variable readyCondition;
+		unsigned int ready = 0;
+		std::string workerError;
+
+		std::vector<std::thread> workers;
+		for (unsigned int i = 0; i < threads; i++) {
+			workers.emplace_back([&, i]() {
+				localCounters = &this->metrics.workers[i];
+				localCounters->tid = Metrics::currentTid();
+
+				std::unique_ptr<App<SSL>> app;
+				std::string error;
+				try {
+					app = this->makeApp<SSL>();
+					this->configureWorker<SSL>(*app);
+				} catch (const std::exception& e) {
+					error = e.what();
+					app.reset();
+				}
+
+				// Child apps have no listening socket: an unarmed, non-fallthrough
+				// timer keeps the loop running while it waits for adopted sockets.
+				struct us_timer_t* keepAlive = us_create_timer((struct us_loop_t*) uWS::Loop::get(), 0, 0);
+
+				{
+					std::lock_guard<std::mutex> lock(readyMutex);
+					apps[i] = app.get();
+					if (!error.empty()) workerError = error;
+					ready++;
+				}
+				readyCondition.notify_all();
+
+				if (app) {
+					app->run();
+				}
+				us_timer_close(keepAlive);
+			});
+		}
+
+		{
+			std::unique_lock<std::mutex> lock(readyMutex);
+			readyCondition.wait(lock, [&]() { return ready == threads; });
+		}
+		if (!workerError.empty()) {
+			EOUT("Error: worker failed to start: " << workerError);
+			std::_Exit(1);
+		}
+
+		for (App<SSL>* app : apps) {
+			acceptor->addChildApp(app);
+		}
+
+		// Stale peer expiry and metrics sampling run on the acceptor's loop
+		struct us_loop_t* loop = (struct us_loop_t*) uWS::Loop::get();
+		struct us_timer_t* cleanupTimer = nullptr;
+		// One full sweep per period, in CLEANUP_SLICES short lock holds
+		if (unsigned int period = this->tracker->getCleanupPeriodMs(); period > 0) {
+			int step = std::max(1, (int) (period / CLEANUP_SLICES));
+			cleanupTimer = us_create_timer(loop, 1, sizeof(WebtorrentTracker*));
+			*(WebtorrentTracker**) us_timer_ext(cleanupTimer) = this;
+			us_timer_set(cleanupTimer, [](struct us_timer_t* timer) {
+				(*(WebtorrentTracker**) us_timer_ext(timer))->runLocked<SSL>([](Tracker& tracker) {
+					tracker.cleanupStalePeersStep(CLEANUP_SLICES);
+				});
+			}, step, step);
+		}
+
+		struct us_timer_t* metricsTimer = us_create_timer(loop, 1, sizeof(WebtorrentTracker*));
+		*(WebtorrentTracker**) us_timer_ext(metricsTimer) = this;
+		us_timer_set(metricsTimer, [](struct us_timer_t* timer) {
+			(*(WebtorrentTracker**) us_timer_ext(timer))->sampleMetrics();
+		}, Metrics::SAMPLE_PERIOD_MS, Metrics::SAMPLE_PERIOD_MS);
+		this->sampleMetrics();
+
+		COUT("Listening on " << (SSL ? "wss://" : "ws://") << this->getAddress() << " with " << threads << " worker thread" << (threads == 1 ? "" : "s"));
+		acceptor->run();
+
+		us_timer_close(metricsTimer);
+		if (cleanupTimer != nullptr) {
+			us_timer_close(cleanupTimer);
+		}
+		for (auto& worker : workers) {
+			worker.detach();
+		}
+	}
+
+	template <bool SSL>
+	void configureWorker(App<SSL>& app) {
 		app.template ws<PeerContext>("/*", {
 			/* Settings */
 			.compression = uWS::SHARED_COMPRESSOR,
@@ -140,32 +303,50 @@ private:
 			}
 		});
 
+		// Original stats format, computed live (like the single-threaded version)
 		app.get("/stats.json", [this](auto* res, auto* req) {
-			size_t peersCount = 0;
-			const Tracker::SwarmMap& swarms = this->tracker->getSwarms();
-			for (const auto& entry : swarms) {
-				peersCount += entry.second->getPeersCount();
+			size_t torrents = 0, peersCount = 0;
+			{
+				std::lock_guard<std::mutex> lock(this->trackerMutex);
+				torrents = this->tracker->getSwarms().size();
+				peersCount = this->tracker->getMembershipCount();
 			}
-
-			// Server stats
-			std::vector<owt::ServerStats> currentStats = {
-				{
-					this->getAddress(),
-					(int) this->websocketCount
-				}
-			};
-
-			owt::ProcessMemory memoryUsage = {this->getResidentMemory(), 0, 0, 0};
-
+			int64_t websockets = 0;
+			for (size_t i = 0; i < this->metrics.threadCount; i++) {
+				websockets += this->metrics.workers[i].websockets.load(std::memory_order_relaxed);
+			}
 			json statsJSON = {
-				{"torrentsCount", swarms.size()},
+				{"torrentsCount", torrents},
 				{"peersCount", peersCount},
-				{"servers", currentStats},
-				{"memory", memoryUsage}
+				{"servers", std::vector<ServerStats>{{this->getAddress(), (int) websockets}}},
+				{"memory", ProcessMemory{(long int) Metrics::residentMemory(), 0, 0, 0}}
 			};
-
 			res->writeHeader("Content-Type", "application/json");
+			res->writeHeader("Cache-Control", "no-store");
 			res->end(statsJSON.dump());
+		});
+
+		// Monitoring (status page): cached, refreshed every sample, no lock taken
+		app.get("/stats/metrics.json", [this](auto* res, auto* req) {
+			std::shared_ptr<const std::string> current = this->metrics.current();
+			res->writeHeader("Content-Type", "application/json");
+			res->writeHeader("Cache-Control", "no-store");
+			res->writeHeader("Access-Control-Allow-Origin", "*");
+			res->end(*current);
+		});
+
+		app.get("/stats/history.json", [this](auto* res, auto* req) {
+			std::string body = this->metrics.history(req->getQuery("range"));
+			res->writeHeader("Content-Type", "application/json");
+			res->writeHeader("Cache-Control", "no-store");
+			res->writeHeader("Access-Control-Allow-Origin", "*");
+			res->end(body);
+		});
+
+		app.get("/status", [](auto* res, auto* req) {
+			res->writeHeader("Content-Type", "text/html; charset=utf-8");
+			res->writeHeader("Cache-Control", "no-cache");
+			res->end(STATUS_PAGE_HTML);
 		});
 
 		app.any("/*", [](auto* res, auto* request) {
@@ -174,31 +355,74 @@ private:
 			res->writeStatus(status);
 			res->end(status);
 		});
+	}
 
-		// Exclusive port: with SO_REUSEPORT a second instance would silently split the swarms
-		bool listening = false;
-		app.listen(this->options.host, this->options.port, LIBUS_LISTEN_EXCLUSIVE_PORT, [&listening](auto* token) {
-			listening = token != nullptr;
-		});
-		if (!listening) {
-			throw std::runtime_error("Failed to listen on " + this->getAddress());
+	// Runs fn on the tracker under the lock, then delivers the messages it produced
+	template <bool SSL, typename Fn>
+	void runLocked(Fn&& fn) {
+		std::vector<PeerContext::Outgoing> out;
+		PeerContext::outbox = &out;
+		{
+			auto start = std::chrono::steady_clock::now();
+			std::lock_guard<std::mutex> lock(this->trackerMutex);
+			auto acquired = std::chrono::steady_clock::now();
+			fn(*this->tracker);
+			if (localCounters != nullptr) {
+				auto done = std::chrono::steady_clock::now();
+				WorkerCounters::add(localCounters->lockWaitNs, std::chrono::duration_cast<std::chrono::nanoseconds>(acquired - start).count());
+				WorkerCounters::add(localCounters->lockHeldNs, std::chrono::duration_cast<std::chrono::nanoseconds>(done - acquired).count());
+			}
+		}
+		PeerContext::outbox = nullptr;
+		this->deliver<SSL>(std::move(out));
+	}
+
+	template <bool SSL>
+	void deliver(std::vector<PeerContext::Outgoing>&& items) {
+		if (items.empty()) {
+			return;
 		}
 
-		// Stale peer expiry runs on the event loop that owns the tracker state
-		struct us_timer_t* cleanupTimer = nullptr;
-		if (unsigned int period = this->tracker->getCleanupPeriodMs(); period > 0) {
-			cleanupTimer = us_create_timer((struct us_loop_t*) uWS::Loop::get(), 1, sizeof(Tracker*));
-			*(Tracker**) us_timer_ext(cleanupTimer) = this->tracker.get();
-			us_timer_set(cleanupTimer, [](struct us_timer_t* timer) {
-				(*(Tracker**) us_timer_ext(timer))->cleanupStalePeers();
-			}, (int) period, (int) period);
+		void* self = uWS::Loop::get();
+		// Batches for other threads, keyed by owning loop (few threads: linear search)
+		std::vector<std::pair<void*, std::vector<std::pair<uint64_t, std::string>>>> remote;
+
+		for (auto& item : items) {
+			std::string frame = item.frame();
+			if (localCounters != nullptr) {
+				WorkerCounters::add(localCounters->messagesOut);
+				WorkerCounters::add(localCounters->bytesOut, frame.size());
+			}
+			if (item.owner == self) {
+				sendLocal<SSL>(item.id, frame);
+				continue;
+			}
+			if (localCounters != nullptr) {
+				WorkerCounters::add(localCounters->crossThreadOut);
+			}
+			auto it = std::find_if(remote.begin(), remote.end(), [&](const auto& batch) { return batch.first == item.owner; });
+			if (it == remote.end()) {
+				remote.emplace_back(item.owner, std::vector<std::pair<uint64_t, std::string>>{});
+				it = remote.end() - 1;
+			}
+			it->second.emplace_back(item.id, std::move(frame));
 		}
 
-		COUT("Listening on " << (SSL ? "wss://" : "ws://") << this->getAddress());
-		app.run();
+		for (auto& [owner, batch] : remote) {
+			static_cast<uWS::Loop*>(owner)->defer([batch = std::move(batch)]() {
+				for (const auto& [id, frame] : batch) {
+					sendLocal<SSL>(id, frame);
+				}
+			});
+		}
+	}
 
-		if (cleanupTimer != nullptr) {
-			us_timer_close(cleanupTimer);
+	// Must run on the thread that owns the connection
+	template <bool SSL>
+	static void sendLocal(uint64_t id, std::string_view frame) {
+		auto it = localSockets.find(id);
+		if (it != localSockets.end()) {
+			static_cast<WebSocket<SSL>*>(it->second)->send(frame, uWS::OpCode::TEXT);
 		}
 	}
 
@@ -214,6 +438,7 @@ private:
 
 		size_t maxConnections = this->options.maxConnectionsPerIp;
 		if (maxConnections > 0 && !peer.address.empty()) {
+			std::lock_guard<std::mutex> lock(this->trackerMutex);
 			auto it = this->connectionsPerAddress.find(peer.address);
 			if (it != this->connectionsPerAddress.end() && it->second >= maxConnections) {
 				DOUT("Too many connections from " << peer.address);
@@ -236,15 +461,19 @@ private:
 	void onOpen(WebSocket<SSL>* ws) {
 		DOUT("CONNECTED");
 
-		this->websocketCount++;
-
-		// Initialize peer context
 		PeerContext* peer = ws->getUserData();
 		peer->socket = ws;
 		peer->sendFn = &WebtorrentTracker::sendFrame<SSL>;
+		peer->id = this->nextConnectionId.fetch_add(1, std::memory_order_relaxed);
+		peer->owner = uWS::Loop::get();
 		peer->rateLimiter = Utils::TokenBucket(this->options.messageRate, this->options.messageBurst);
+		localSockets[peer->id] = ws;
 
-		if (!peer->address.empty()) {
+		localCounters->websockets.fetch_add(1, std::memory_order_relaxed);
+		WorkerCounters::add(localCounters->opened);
+
+		if (this->options.maxConnectionsPerIp > 0 && !peer->address.empty()) {
+			std::lock_guard<std::mutex> lock(this->trackerMutex);
 			this->connectionsPerAddress[peer->address]++;
 		}
 	}
@@ -252,33 +481,63 @@ private:
 	template <bool SSL>
 	void onMessage(WebSocket<SSL>* ws, std::string_view message, uWS::OpCode opCode) {
 		PeerContext* peer = ws->getUserData();
+		WorkerCounters::add(localCounters->messagesIn);
+		WorkerCounters::add(localCounters->bytesIn, message.size());
 
 		// Checked before parsing, which is the expensive part
 		if (!peer->rateLimiter.consume()) {
 			DOUT("Rate limit exceeded by " << peer->address);
+			WorkerCounters::add(localCounters->rateLimited);
 			ws->end(1008, "Rate limit exceeded");
 			return;
 		}
 
 		DOUT("Received: " << message);
 
-		// Check JSON input
+		// Parsed outside the tracker lock
 		json data = json::parse(message, nullptr, false);
 
 		if (data.is_discarded()) {
 			DOUT("Invalid JSON");
+			WorkerCounters::add(localCounters->invalid);
 			ws->close();
 			return;
 		}
 
-		try {
-			this->tracker->processMessage(data, peer);
-		} catch (const TrackerException& e) {
-			// Protocol errors are reported to the client, like bittorrent-tracker does
-			DOUT("Error: " << e.what());
-			peer->sendMessage(this->failureMessage(data, e.what()));
-		} catch (const std::exception& e) {
-			EOUT("Error: " << e.what());
+		if (data.is_object()) {
+			auto action = data.find("action");
+			if (action != data.end() && action->is_string()) {
+				const std::string& name = action->get_ref<const std::string&>();
+				if (name == "scrape") {
+					WorkerCounters::add(localCounters->scrapes);
+				} else if (data.contains("answer")) {
+					WorkerCounters::add(localCounters->answers);
+				} else {
+					WorkerCounters::add(localCounters->announces);
+				}
+			}
+		}
+
+		// `data` must outlive delivery: queued offers/answers point into it
+		// (PeerContext::Outgoing). runLocked delivers before returning.
+		const uint64_t id = peer->id;
+		bool closeConnection = false;
+		this->runLocked<SSL>([&](Tracker& tracker) {
+			try {
+				tracker.processMessage(data, peer);
+			} catch (const TrackerException& e) {
+				// Protocol errors are reported to the client, like bittorrent-tracker does
+				DOUT("Error: " << e.what());
+				WorkerCounters::add(localCounters->failures);
+				peer->sendMessage(this->failureMessage(data, e.what()));
+			} catch (const std::exception& e) {
+				EOUT("Error: " << e.what());
+				closeConnection = true;
+			}
+		});
+
+		// Delivery can close this very socket (backpressure limit): check it still exists
+		if (closeConnection && localSockets.count(id) > 0) {
 			ws->close();
 		}
 	}
@@ -287,17 +546,35 @@ private:
 	void onClose(WebSocket<SSL>* ws, int code, std::string_view message) {
 		DOUT("DISCONNECTED");
 
-		this->websocketCount--;
-
 		PeerContext* peer = ws->getUserData();
-		this->tracker->disconnectPeer(peer);
-		peer->socket = nullptr;
+		localSockets.erase(peer->id);
+		localCounters->websockets.fetch_sub(1, std::memory_order_relaxed);
+		WorkerCounters::add(localCounters->closed);
 
-		if (auto it = this->connectionsPerAddress.find(peer->address); it != this->connectionsPerAddress.end()) {
-			if (--it->second == 0) {
-				this->connectionsPerAddress.erase(it);
+		this->runLocked<SSL>([&](Tracker& tracker) {
+			tracker.disconnectPeer(peer);
+			if (auto it = this->connectionsPerAddress.find(peer->address); it != this->connectionsPerAddress.end()) {
+				if (--it->second == 0) {
+					this->connectionsPerAddress.erase(it);
+				}
 			}
+		});
+		peer->socket = nullptr;
+	}
+
+	// Runs on the acceptor thread every Metrics::SAMPLE_PERIOD_MS
+	void sampleMetrics() {
+		MetricsSample sample;
+		{
+			std::lock_guard<std::mutex> lock(this->trackerMutex);
+			sample.torrents = this->tracker->getSwarms().size();
+			sample.peers = this->tracker->getPeerIdCount();
+			sample.memberships = this->tracker->getMembershipCount();
+			sample.seeders = this->tracker->getSeederCount();
+			sample.leechers = sample.memberships - sample.seeders;
 		}
+		this->metrics.collect(sample);
+		this->metrics.record(std::move(sample));
 	}
 
 	template <bool SSL>
@@ -334,20 +611,6 @@ private:
 
 	std::string getAddress() const {
 		return (this->options.host.empty() ? "0.0.0.0" : this->options.host) + ":" + std::to_string(this->options.port);
-	}
-
-	// Current resident set size in bytes
-	long int getResidentMemory() const {
-		long int pages = 0, residentPages = 0;
-		std::ifstream statm("/proc/self/statm");
-		if (statm >> pages >> residentPages) {
-			return residentPages * sysconf(_SC_PAGESIZE);
-		}
-
-		// Fallback to peak usage (reported in kilobytes)
-		struct rusage usage;
-		getrusage(RUSAGE_SELF, &usage);
-		return usage.ru_maxrss * 1024;
 	}
 
 	bool fileExists(const std::string& filename) {

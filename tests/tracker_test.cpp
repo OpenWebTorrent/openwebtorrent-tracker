@@ -1,6 +1,7 @@
 // Unit tests for the tracker logic. Peers are fake sockets that record
 // every message the tracker sends them.
 
+#include <cstdlib>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -583,22 +584,146 @@ static void testStaleMembershipsExpire() {
 	CHECK(tracker.getCleanupPeriodMs() == 5000);
 }
 
+// Multi-threaded server: while an outbox is set, messages are queued with the
+// target's connection id and owning loop instead of written to the socket.
+static void testOutboxQueuesMessages() {
+	FastTracker tracker;
+	FakePeer a, b;
+	a.ctx.id = 1; a.ctx.owner = (void*) 0x1;
+	b.ctx.id = 2; b.ctx.owner = (void*) 0x2;
+
+	tracker.processMessage(announce(IH1, peerId('a')), &a.ctx);
+	a.inbox.clear();
+
+	std::vector<PeerContext::Outgoing> out;
+	PeerContext::outbox = &out;
+	// b announces with an offer: b gets its reply, a gets b's offer.
+	// Queued offers point into the request, which must outlive delivery.
+	json request = announce(IH1, peerId('b'), "started", 1);
+	tracker.processMessage(request, &b.ctx);
+	PeerContext::outbox = nullptr;
+
+	CHECK(a.inbox.empty());
+	CHECK(b.inbox.empty());
+	CHECK(out.size() == 2);
+	bool toA = false, toB = false;
+	for (const auto& m : out) {
+		json frame = json::parse(m.frame());
+		if (m.id == 1 && m.owner == (void*) 0x1 && frame.contains("offer")) toA = true;
+		if (m.id == 2 && m.owner == (void*) 0x2 && frame.contains("interval")) toB = true;
+	}
+	CHECK(toA);
+	CHECK(toB);
+
+	// No outbox: sent directly, as before
+	tracker.processMessage(announce(IH1, peerId('b'), "update"), &b.ctx);
+	CHECK(b.inbox.size() == 1);
+
+	// Closed connection (socket cleared): nothing queued
+	b.ctx.socket = nullptr;
+	PeerContext::outbox = &out;
+	out.clear();
+	b.ctx.sendMessage(json{{"x", 1}});
+	PeerContext::outbox = nullptr;
+	CHECK(out.empty());
+}
+
+// Offers and answers are written as frames without building a json object:
+// the bytes must be identical to serializing the original object.
+static void testRelayFramesMatchJson() {
+	// Binary ids with invalid UTF-8, and an SDP with characters that need escaping
+	std::string infoHash = std::string("\xff\xfe\x00\x01", 4) + std::string(16, 'h');
+	std::string fromPeer = "\"quote\\back\x7f" + std::string(8, '\xc3');
+	json offerItem = {{"offer_id", "id\n1"}, {"offer", {{"type", "offer"}, {"sdp", "v=0\r\no=- \"x\" \u00e9\t\x01"}}}};
+	json expectedOffer = {
+		{"action", "announce"}, {"info_hash", infoHash}, {"offer_id", offerItem["offer_id"]}, {"peer_id", fromPeer},
+		{"offer", {{"type", "offer"}, {"sdp", offerItem["offer"]["sdp"]}}}
+	};
+	CHECK(PeerContext::offerFrame(offerItem, fromPeer, infoHash) == PeerContext::serialize(expectedOffer));
+
+	json request = {{"answer", {{"type", "answer"}, {"sdp", "a=\\b\"c"}}}, {"offer_id", "o\u2028"}};
+	json expectedAnswer = {
+		{"action", "announce"}, {"answer", {{"type", "answer"}, {"sdp", request["answer"]["sdp"]}}},
+		{"offer_id", request["offer_id"]}, {"peer_id", fromPeer}, {"info_hash", infoHash}
+	};
+	CHECK(PeerContext::answerFrame(request, fromPeer, infoHash) == PeerContext::serialize(expectedAnswer));
+}
+
+// Running totals must match a full walk after any sequence of operations
+static void testCountersMatchWalk() {
+	FastTracker tracker;
+	std::vector<std::unique_ptr<FakePeer>> peers;
+	for (int i = 0; i < 40; i++) peers.push_back(std::make_unique<FakePeer>());
+	std::mt19937 rng(7);
+	const std::string hashes[] = {std::string(20, 'p'), std::string(20, 'q'), std::string(20, 'r')};
+	for (int step = 0; step < 4000; step++) {
+		FakePeer& p = *peers[rng() % peers.size()];
+		std::string id = peerId('A' + rng() % 26);
+		const std::string& ih = hashes[rng() % 3];
+		switch (rng() % 6) {
+		case 0: { json m = announce(ih, id); m["left"] = 0; tracker.processMessage(m, &p.ctx); break; }
+		case 1: tracker.processMessage(announce(ih, id, "completed"), &p.ctx); break;
+		case 2: tracker.processMessage(announce(ih, id, "stopped"), &p.ctx); break;
+		case 3: tracker.disconnectPeer(&p.ctx); break;
+		case 4: tracker.cleanupStalePeers(std::chrono::steady_clock::now() + std::chrono::seconds(rng() % 2 ? 0 : 100000)); break;
+		default: tracker.processMessage(announce(ih, id, "paused"), &p.ctx); break;
+		}
+		size_t memberships = 0, seeders = 0;
+		for (const auto& entry : tracker.getSwarms()) {
+			memberships += entry.second->getPeersCount();
+			seeders += entry.second->getCompletedCount();
+		}
+		if (memberships != tracker.getMembershipCount() || seeders != tracker.getSeederCount()) {
+			CHECK(memberships == tracker.getMembershipCount());
+			CHECK(seeders == tracker.getSeederCount());
+			return;
+		}
+	}
+}
+
+// An incremental sweep in N steps removes exactly what one full sweep removes
+static void testIncrementalCleanup() {
+	FastTracker tracker(20, 10);
+	std::vector<std::unique_ptr<FakePeer>> peers;
+	for (int i = 0; i < 500; i++) {
+		peers.push_back(std::make_unique<FakePeer>());
+		std::string id = std::string(16, 'z') + std::to_string(1000 + i);
+		tracker.processMessage(announce(IH1, id), &peers.back()->ctx);
+	}
+	auto later = std::chrono::steady_clock::now() + std::chrono::seconds(100);
+	// Partial sweep: something left
+	for (int i = 0; i < 3; i++) tracker.cleanupStalePeersStep(later, 8);
+	CHECK(tracker.getPeerIdCount() > 0);
+	CHECK(tracker.getPeerIdCount() < 500);
+	// Finish the sweep (plus one extra round in case the table rehashed)
+	for (int i = 0; i < 16; i++) tracker.cleanupStalePeersStep(later, 8);
+	CHECK(tracker.getPeerIdCount() == 0);
+	CHECK(tracker.getSwarms().empty());
+	CHECK(tracker.getMembershipCount() == 0);
+}
+
+#define RUN(t) do { if (std::getenv("OWT_TEST_VERBOSE")) std::cerr << #t << std::endl; t(); } while (0)
+
 int main() {
-	testMalformedInputNeverCrashes();
-	testAnnounceResponse();
-	testOffersAreDistributed();
-	testRandomPeersAreUniform();
-	testAnswerIsRouted();
-	testReconnectWithSamePeerId();
-	testStopAndDisconnectCleanUp();
-	testCompletedAndScrape();
-	testBinaryStrings();
-	testLimits();
-	testTokenBucket();
-	testAddressKey();
-	testMultiplePeerIdsPerConnection();
-	testPausedPartialSeeds();
-	testStaleMembershipsExpire();
+	RUN(testMalformedInputNeverCrashes);
+	RUN(testAnnounceResponse);
+	RUN(testOffersAreDistributed);
+	RUN(testRandomPeersAreUniform);
+	RUN(testAnswerIsRouted);
+	RUN(testReconnectWithSamePeerId);
+	RUN(testStopAndDisconnectCleanUp);
+	RUN(testCompletedAndScrape);
+	RUN(testBinaryStrings);
+	RUN(testLimits);
+	RUN(testTokenBucket);
+	RUN(testAddressKey);
+	RUN(testMultiplePeerIdsPerConnection);
+	RUN(testPausedPartialSeeds);
+	RUN(testStaleMembershipsExpire);
+	RUN(testOutboxQueuesMessages);
+	RUN(testRelayFramesMatchJson);
+	RUN(testCountersMatchWalk);
+	RUN(testIncrementalCleanup);
 
 	if (failures) {
 		std::cerr << failures << " check(s) failed" << std::endl;

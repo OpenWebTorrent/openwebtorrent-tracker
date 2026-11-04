@@ -1,0 +1,579 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tracker status</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11,11,11,0.10);
+  --wash: rgba(11,11,11,0.04);
+  --s1: #2a78d6;
+  --s2: #eb6834;
+  --s3: #1baf7a;
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+  --good-text: #006300;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #f0efec;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255,255,255,0.10);
+    --wash: rgba(255,255,255,0.05);
+    --s1: #3987e5;
+    --s2: #d95926;
+    --s3: #199e70;
+    --good-text: #0ca30c;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --ink: #f0efec;
+  --ink-2: #c3c2b7;
+  --muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255,255,255,0.10);
+  --wash: rgba(255,255,255,0.05);
+  --s1: #3987e5;
+  --s2: #d95926;
+  --s3: #199e70;
+  --good-text: #0ca30c;
+}
+
+* { box-sizing: border-box; }
+html { background: var(--page); }
+body {
+  margin: 0;
+  padding: max(24px, env(safe-area-inset-top, 0px)) 16px max(32px, env(safe-area-inset-bottom, 0px));
+  background: var(--page);
+  color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+.wrap { max-width: 1200px; margin: 0 auto; }
+
+header { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 24px; margin-bottom: 20px; }
+h1 { font-size: 22px; font-weight: 650; margin: 0 0 4px; letter-spacing: -0.01em; }
+.sub { color: var(--ink-2); margin: 0; }
+.sub span + span::before { content: "·"; margin: 0 8px; color: var(--muted); }
+
+.badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px 6px 10px; border-radius: 999px; background: var(--surface); border: 1px solid var(--border); font-weight: 600; white-space: nowrap; }
+.badge svg { flex: none; }
+
+.filters { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 0 0 16px; }
+.seg { display: inline-flex; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 2px; }
+.seg button { font: inherit; color: var(--ink-2); background: none; border: 0; border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+.seg button:hover { background: var(--wash); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); font-weight: 600; }
+.seg button:focus-visible, summary:focus-visible, .chart:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
+.note { color: var(--muted); font-size: 13px; }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; min-width: 0; }
+.tile .label { color: var(--ink-2); font-size: 13px; }
+.tile .value { font-size: 26px; font-weight: 600; letter-spacing: -0.01em; margin-top: 2px; }
+.tile .hint { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.tile.hero { grid-column: span 2; }
+.tile.hero .value { font-size: 48px; line-height: 1.1; }
+@media (max-width: 520px) { .tile.hero { grid-column: span 1; } .tile.hero .value { font-size: 40px; } }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr)); gap: 12px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; min-width: 0; }
+.card h2 { font-size: 15px; font-weight: 600; margin: 0; }
+.card .desc { color: var(--ink-2); font-size: 13px; margin: 2px 0 10px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0 0 6px; color: var(--ink-2); font-size: 13px; }
+.legend i { display: inline-block; width: 14px; height: 2px; border-radius: 1px; vertical-align: middle; margin-right: 6px; }
+.chart { position: relative; height: 200px; }
+.chart svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.chart.loading { opacity: .5; transition: opacity .2s; }
+
+.tip { position: absolute; pointer-events: none; z-index: 2; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,.12); padding: 8px 10px; font-size: 12px; min-width: 140px; }
+.tip .when { color: var(--muted); margin-bottom: 4px; }
+.tip .row { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.tip .row b { font-weight: 650; color: var(--ink); font-variant-numeric: tabular-nums; }
+.tip .row span { color: var(--ink-2); display: inline-flex; align-items: center; gap: 6px; }
+.tip .row i { display: inline-block; width: 12px; height: 2px; border-radius: 1px; }
+
+details { margin-top: 8px; }
+summary { cursor: pointer; color: var(--ink-2); font-size: 13px; width: max-content; }
+.tablewrap { overflow-x: auto; max-height: 260px; overflow-y: auto; margin-top: 6px; border: 1px solid var(--border); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 4px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { position: sticky; top: 0; background: var(--surface); color: var(--ink-2); font-weight: 600; }
+
+.threads { display: grid; gap: 8px; }
+.thread { display: grid; grid-template-columns: 82px 1fr 64px; align-items: center; gap: 10px; font-size: 13px; }
+.thread .name { color: var(--ink-2); white-space: nowrap; }
+.thread .track { height: 8px; border-radius: 4px; background: var(--grid); overflow: hidden; }
+.thread .fill { height: 100%; border-radius: 4px; background: var(--s1); }
+.thread .fill.warn { background: var(--warning); }
+.thread .fill.crit { background: var(--critical); }
+.thread .num { text-align: right; font-variant-numeric: tabular-nums; }
+.thread .num small { display: block; color: var(--muted); font-size: 11px; }
+
+.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.checks li { display: grid; grid-template-columns: 20px 1fr auto; gap: 10px; align-items: start; padding: 8px 0; border-bottom: 1px solid var(--grid); }
+.checks li:last-child { border-bottom: 0; }
+.checks .what { font-weight: 600; }
+.checks .why { color: var(--ink-2); font-size: 13px; }
+.checks .val { font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 600; white-space: nowrap; }
+.checks .lvl { font-size: 12px; color: var(--ink-2); font-weight: 400; display: block; text-align: right; }
+.span2 { grid-column: 1 / -1; }
+footer { color: var(--muted); font-size: 12px; margin-top: 20px; }
+footer code { font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>OpenWebtorrent tracker</h1>
+      <p class="sub" id="sub"><span>Connecting…</span></p>
+    </div>
+    <div class="badge" id="badge" role="status" aria-live="polite"></div>
+  </header>
+
+  <div class="filters" role="group" aria-label="Time range">
+    <div class="seg" id="ranges">
+      <button type="button" data-range="15m">15 min</button>
+      <button type="button" data-range="1h">1 hour</button>
+      <button type="button" data-range="6h">6 hours</button>
+      <button type="button" data-range="24h">24 hours</button>
+      <button type="button" data-range="7d">7 days</button>
+    </div>
+    <span class="note" id="rangeNote"></span>
+  </div>
+
+  <section class="tiles" id="tiles" aria-label="Current values"></section>
+
+  <section class="grid" id="charts">
+    <div class="card span2">
+      <h2>Health checks</h2>
+      <p class="desc">What to watch on this tracker, evaluated on the latest sample.</p>
+      <ul class="checks" id="checks"></ul>
+    </div>
+  </section>
+
+  <footer>
+    Data: <code>/stats/metrics.json</code> (every 5 s) and <code>/stats/history.json</code>. History is kept in memory by the tracker:
+    5-second samples for the last hour, 1-minute samples for 7 days, reset when the tracker restarts.
+  </footer>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---------- formatting ----------
+  const nf = new Intl.NumberFormat('en-US');
+  function compact(n) {
+    if (n == null || !isFinite(n)) return '–';
+    const a = Math.abs(n);
+    if (a >= 1e9) return trim(n / 1e9) + 'B';
+    if (a >= 1e6) return trim(n / 1e6) + 'M';
+    if (a >= 1e4) return trim(n / 1e3) + 'K';
+    return a >= 100 || Number.isInteger(n) ? nf.format(Math.round(n)) : n.toFixed(1);
+  }
+  function trim(x) { return (Math.abs(x) >= 100 ? x.toFixed(0) : x.toFixed(1)).replace(/\.0$/, ''); }
+  function bytes(n, suffix = '') {
+    if (n == null || !isFinite(n)) return '–';
+    const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0;
+    while (Math.abs(n) >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (i === 0 ? Math.round(n) : n.toFixed(n >= 100 ? 0 : 1)) + ' ' + u[i] + suffix;
+  }
+  const pct = (n) => (n == null || !isFinite(n)) ? '–' : (n >= 100 ? Math.round(n) : n.toFixed(1)) + '%';
+  const perSec = (n) => compact(n) + '/s';
+  function duration(s) {
+    const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+    if (d) return d + 'd ' + h + 'h';
+    if (h) return h + 'h ' + m + 'm';
+    return m + 'm ' + Math.floor(s % 60) + 's';
+  }
+  function clock(t, withDay) {
+    const d = new Date(t);
+    const hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return withDay ? d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + hm : hm;
+  }
+
+  // ---------- DOM helpers (text via textContent only) ----------
+  const SVGNS = 'http://www.w3.org/2000/svg';
+  function el(tag, attrs = {}, text) {
+    const e = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+    if (text != null) e.textContent = text;
+    return e;
+  }
+  function sv(tag, attrs = {}, text) {
+    const e = document.createElementNS(SVGNS, tag);
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+    if (text != null) e.textContent = text;
+    return e;
+  }
+  const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+  // Status icons: shape differs per level, so state never rides on color alone
+  function statusIcon(level) {
+    const s = sv('svg', { width: 16, height: 16, viewBox: '0 0 16 16', 'aria-hidden': 'true' });
+    const color = { good: 'var(--good)', warning: 'var(--warning)', serious: 'var(--serious)', critical: 'var(--critical)', unknown: 'var(--muted)' }[level];
+    if (level === 'good') {
+      s.append(sv('circle', { cx: 8, cy: 8, r: 7, fill: color }), sv('path', { d: 'M4.8 8.2l2.2 2.2 4.2-4.6', stroke: '#fff', 'stroke-width': 1.8, fill: 'none', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+    } else if (level === 'warning' || level === 'serious') {
+      s.append(sv('path', { d: 'M8 1.5l7 12.5H1z', fill: color, 'stroke-linejoin': 'round' }), sv('path', { d: 'M8 6v3.6', stroke: '#0b0b0b', 'stroke-width': 1.8, 'stroke-linecap': 'round' }), sv('circle', { cx: 8, cy: 11.8, r: 1, fill: '#0b0b0b' }));
+    } else if (level === 'critical') {
+      s.append(sv('rect', { x: 1, y: 1, width: 14, height: 14, rx: 3, fill: color }), sv('path', { d: 'M5.3 5.3l5.4 5.4M10.7 5.3l-5.4 5.4', stroke: '#fff', 'stroke-width': 1.8, 'stroke-linecap': 'round' }));
+    } else {
+      s.append(sv('circle', { cx: 8, cy: 8, r: 6.2, fill: 'none', stroke: color, 'stroke-width': 1.6 }), sv('path', { d: 'M8 5v3.5', stroke: color, 'stroke-width': 1.6, 'stroke-linecap': 'round' }));
+    }
+    return s;
+  }
+  const LEVEL_LABEL = { good: 'Healthy', warning: 'Warning', serious: 'Degraded', critical: 'Critical', unknown: 'No data' };
+  const RANK = { good: 0, unknown: 1, warning: 2, serious: 3, critical: 4 };
+
+  // ---------- chart definitions (each chart: one unit, one axis, <= 3 series) ----------
+  const CHARTS = [
+    { id: 'conns', title: 'Open connections', desc: 'WebSocket connections held right now. A sudden drop means clients are being disconnected.',
+      series: [{ key: 'websockets', label: 'Connections' }], fmt: compact },
+    { id: 'swarm', title: 'Peers and torrents', desc: 'Distinct peer IDs and torrents with at least one peer.',
+      series: [{ key: 'peers', label: 'Peers' }, { key: 'torrents', label: 'Torrents' }], fmt: compact },
+    { id: 'msgs', title: 'Messages per second', desc: 'Signaling messages received from clients and sent to them (offers, answers, replies).',
+      series: [{ key: 'messagesIn', label: 'Received' }, { key: 'messagesOut', label: 'Sent' }], fmt: perSec },
+    { id: 'cpu', title: 'Process CPU', desc: 'All tracker threads together. 100% = one full core.',
+      series: [{ key: 'cpu', label: 'CPU' }], fmt: pct },
+    { id: 'lock', title: 'Shared-state lock', desc: 'Time threads spend waiting for / holding the tracker lock, in % of one core. Rising wait means threads are contending.',
+      series: [{ key: 'lockWaitPct', label: 'Waiting' }, { key: 'lockHeldPct', label: 'Holding' }], fmt: pct },
+    { id: 'churn', title: 'Connection churn', desc: 'Connections opened and closed per second. A spike in closes with a drop in connections is a mass disconnect.',
+      series: [{ key: 'opened', label: 'Opened' }, { key: 'closed', label: 'Closed' }], fmt: perSec },
+    { id: 'abuse', title: 'Rejected traffic', desc: 'Connections closed for exceeding the rate limit or sending invalid JSON, and protocol errors sent back.',
+      series: [{ key: 'rateLimited', label: 'Rate limited' }, { key: 'invalid', label: 'Invalid JSON' }, { key: 'failures', label: 'Protocol errors' }], fmt: perSec },
+    { id: 'bw', title: 'Bandwidth', desc: 'WebSocket payload bytes per second (before Cloudflare).',
+      series: [{ key: 'bytesIn', label: 'In' }, { key: 'bytesOut', label: 'Out' }], fmt: (n) => bytes(n, '/s') },
+    { id: 'mem', title: 'Memory', desc: 'Resident memory of the tracker process.',
+      series: [{ key: 'rssMB', label: 'Memory' }], fmt: (n) => bytes(n * 1048576) },
+  ];
+  const SLOT = ['--s1', '--s2', '--s3'];
+
+  // ---------- state ----------
+  const state = { range: '1h', history: null, current: null, lastOk: 0, error: null };
+  try { const r = localStorage.getItem('owt-range'); if (r) state.range = r; } catch (e) {}
+
+  // ---------- build static layout ----------
+  const chartsEl = document.getElementById('charts');
+  const chartEls = {};
+  for (const def of CHARTS) {
+    const card = el('div', { class: 'card' });
+    card.append(el('h2', {}, def.title), el('p', { class: 'desc' }, def.desc));
+    if (def.series.length > 1) {
+      const lg = el('div', { class: 'legend' });
+      def.series.forEach((s, i) => { const item = el('span'); const key = el('i'); key.style.background = `var(${SLOT[i]})`; item.append(key, document.createTextNode(s.label)); lg.append(item); });
+      card.append(lg);
+    }
+    const box = el('div', { class: 'chart', tabindex: '0', role: 'img', 'aria-label': def.title });
+    card.append(box);
+    const det = el('details'); det.append(el('summary', {}, 'View data')); const tw = el('div', { class: 'tablewrap' }); det.append(tw); card.append(det);
+    det.addEventListener('toggle', () => { if (det.open) renderTable(def, tw); });
+    chartsEl.append(card);
+    chartEls[def.id] = { box, table: tw, details: det };
+  }
+  // Threads panel
+  const threadCard = el('div', { class: 'card' });
+  threadCard.append(el('h2', {}, 'Threads'), el('p', { class: 'desc' }, 'CPU per thread (100% = the thread\'s whole core) and connections it owns. One thread pinned near 100% is the bottleneck.'));
+  const threadsEl = el('div', { class: 'threads' }); threadCard.append(threadsEl);
+  chartsEl.insertBefore(threadCard, chartsEl.children[1]);
+
+  // ---------- line chart with crosshair tooltip ----------
+  function niceMax(v) {
+    if (!(v > 0)) return 1;
+    const p = Math.pow(10, Math.floor(Math.log10(v))); const n = v / p;
+    return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * p;
+  }
+
+  function renderChart(def, hist) {
+    const { box } = chartEls[def.id];
+    box.replaceChildren();
+    const t = hist && hist.t || [];
+    if (t.length < 2) { box.append(el('p', { class: 'note' }, 'Collecting data…')); return; }
+
+    const W = Math.max(280, box.clientWidth), H = box.clientHeight;
+    const m = { l: 52, r: 76, t: 8, b: 22 };
+    const iw = W - m.l - m.r, ih = H - m.t - m.b;
+    const svg = sv('svg', { viewBox: `0 0 ${W} ${H}`, 'aria-hidden': 'true' });
+
+    const t0 = t[0], t1 = t[t.length - 1];
+    let maxV = 0;
+    for (const s of def.series) for (const v of hist[s.key] || []) if (v > maxV) maxV = v;
+    const yMax = niceMax(maxV * 1.08);
+    const x = (tv) => m.l + (t1 === t0 ? 0 : (tv - t0) / (t1 - t0) * iw);
+    const y = (v) => m.t + ih - (v / yMax) * ih;
+
+    // grid + y ticks
+    const ticks = 4;
+    for (let i = 0; i <= ticks; i++) {
+      const v = yMax * i / ticks, yy = y(v);
+      svg.append(sv('line', { x1: m.l, x2: m.l + iw, y1: yy, y2: yy, stroke: i === 0 ? 'var(--axis)' : 'var(--grid)', 'stroke-width': 1, 'shape-rendering': 'crispEdges' }));
+      svg.append(sv('text', { x: m.l - 8, y: yy + 4, 'text-anchor': 'end', 'font-size': 11, fill: 'var(--muted)', style: 'font-variant-numeric: tabular-nums' }, def.fmt(v)));
+    }
+    // x ticks
+    const multiDay = t1 - t0 > 20 * 3600e3;
+    const xt = Math.max(2, Math.min(6, Math.floor(iw / 110)));
+    for (let i = 0; i <= xt; i++) {
+      const tv = t0 + (t1 - t0) * i / xt;
+      svg.append(sv('text', { x: x(tv), y: H - 4, 'text-anchor': i === 0 ? 'start' : i === xt ? 'end' : 'middle', 'font-size': 11, fill: 'var(--muted)' }, clock(tv, multiDay)));
+    }
+
+    // series: area wash for single series, 2px lines, end dot + direct end label
+    const ends = [];
+    def.series.forEach((s, si) => {
+      const vals = hist[s.key] || []; const color = `var(${SLOT[si]})`;
+      let d = '';
+      vals.forEach((v, i) => { d += (i ? 'L' : 'M') + x(t[i]).toFixed(1) + ' ' + y(v).toFixed(1); });
+      if (def.series.length === 1) {
+        svg.append(sv('path', { d: d + `L${x(t1).toFixed(1)} ${y(0)}L${x(t0).toFixed(1)} ${y(0)}Z`, fill: color, 'fill-opacity': 0.1, stroke: 'none' }));
+      }
+      svg.append(sv('path', { d, fill: 'none', stroke: color, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+      const last = vals[vals.length - 1];
+      ends.push({ y: y(last), v: last, color, label: s.label });
+    });
+    // end dots (ring in surface color) + value labels; skip labels that would collide
+    ends.sort((a, b) => a.y - b.y);
+    let lastY = -Infinity;
+    for (const e of ends) {
+      svg.append(sv('circle', { cx: x(t1), cy: e.y, r: 4, fill: e.color, stroke: 'var(--surface)', 'stroke-width': 2 }));
+      if (e.y - lastY >= 14) {
+        svg.append(sv('text', { x: x(t1) + 9, y: e.y + 4, 'font-size': 12, 'font-weight': 600, fill: 'var(--ink)' }, def.fmt(e.v)));
+        lastY = e.y;
+      }
+    }
+
+    // crosshair + tooltip (pointer and keyboard)
+    const cross = sv('line', { y1: m.t, y2: m.t + ih, stroke: 'var(--muted)', 'stroke-width': 1, visibility: 'hidden' });
+    const dots = def.series.map((s, si) => sv('circle', { r: 4, fill: `var(${SLOT[si]})`, stroke: 'var(--surface)', 'stroke-width': 2, visibility: 'hidden' }));
+    svg.append(cross, ...dots);
+    const hit = sv('rect', { x: m.l, y: 0, width: iw, height: H, fill: 'transparent' });
+    svg.append(hit);
+    box.append(svg);
+
+    const tip = el('div', { class: 'tip', hidden: '' }); box.append(tip);
+    let idx = -1;
+    function show(i) {
+      idx = Math.max(0, Math.min(t.length - 1, i));
+      const xx = x(t[idx]);
+      cross.setAttribute('x1', xx); cross.setAttribute('x2', xx); cross.setAttribute('visibility', 'visible');
+      def.series.forEach((s, si) => { const v = (hist[s.key] || [])[idx]; dots[si].setAttribute('cx', xx); dots[si].setAttribute('cy', y(v)); dots[si].setAttribute('visibility', 'visible'); });
+      tip.replaceChildren(el('div', { class: 'when' }, clock(t[idx], multiDay)));
+      def.series.forEach((s, si) => {
+        const row = el('div', { class: 'row' }); const name = el('span'); const k = el('i'); k.style.background = `var(${SLOT[si]})`;
+        name.append(k, document.createTextNode(s.label)); row.append(name, el('b', {}, def.fmt((hist[s.key] || [])[idx]))); tip.append(row);
+      });
+      tip.hidden = false;
+      const bw = box.clientWidth, tw = tip.offsetWidth;
+      const px = xx / W * bw;
+      tip.style.left = Math.max(0, Math.min(bw - tw, px > bw / 2 ? px - tw - 12 : px + 12)) + 'px';
+      tip.style.top = '8px';
+    }
+    function hide() { idx = -1; tip.hidden = true; cross.setAttribute('visibility', 'hidden'); dots.forEach((d) => d.setAttribute('visibility', 'hidden')); }
+    function nearest(clientX) {
+      const r = svg.getBoundingClientRect(); const sx = (clientX - r.left) / r.width * W;
+      const tv = t0 + (sx - m.l) / iw * (t1 - t0);
+      let lo = 0, hi = t.length - 1;
+      while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (t[mid] < tv) lo = mid; else hi = mid; }
+      return Math.abs(t[lo] - tv) <= Math.abs(t[hi] - tv) ? lo : hi;
+    }
+    hit.addEventListener('pointermove', (ev) => show(nearest(ev.clientX)));
+    hit.addEventListener('pointerleave', hide);
+    box.onkeydown = (ev) => {
+      if (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') { ev.preventDefault(); show((idx < 0 ? t.length - 1 : idx) + (ev.key === 'ArrowLeft' ? -1 : 1)); }
+      else if (ev.key === 'Escape') hide();
+    };
+    box.onfocus = () => show(t.length - 1);
+    box.onblur = hide;
+    box.setAttribute('aria-label', `${def.title}: ` + def.series.map((s) => `${s.label} ${def.fmt((hist[s.key] || []).slice(-1)[0])}`).join(', ') + '. Use arrow keys to read values.');
+  }
+
+  function renderTable(def, container) {
+    const hist = state.history; container.replaceChildren();
+    if (!hist || !hist.t || !hist.t.length) { container.append(el('p', { class: 'note' }, 'No data yet.')); return; }
+    const table = el('table'); const head = el('tr'); head.append(el('th', {}, 'Time'));
+    def.series.forEach((s) => head.append(el('th', {}, s.label)));
+    const thead = el('thead'); thead.append(head); table.append(thead);
+    const tb = el('tbody'); const n = hist.t.length; const step = Math.max(1, Math.ceil(n / 120));
+    const multiDay = hist.t[n - 1] - hist.t[0] > 20 * 3600e3;
+    for (let i = n - 1; i >= 0; i -= step) {
+      const tr = el('tr'); tr.append(el('td', {}, clock(hist.t[i], multiDay)));
+      def.series.forEach((s) => tr.append(el('td', {}, def.fmt((hist[s.key] || [])[i]))));
+      tb.append(tr);
+    }
+    table.append(tb); container.append(table);
+  }
+
+  // ---------- health checks ----------
+  function evaluate(cur, hist) {
+    const checks = [];
+    const age = cur ? (Date.now() - cur.time) / 1000 : Infinity;
+    const stale = !cur || state.error || age > 20;
+    checks.push({ what: 'Tracker responding', why: 'Metrics refresh every 5 s. No fresh sample means the tracker (or Cloudflare in front of it) is not answering.',
+      val: stale ? (state.error || 'stale') : 'updated ' + Math.max(0, Math.round(age)) + ' s ago', level: stale ? 'critical' : 'good' });
+    if (!cur) return checks;
+
+    const workers = (cur.threads || []).filter((t) => t.name !== 'acceptor');
+    const hottest = workers.reduce((a, b) => (b.cpu > (a ? a.cpu : -1) ? b : a), null);
+    const hc = hottest ? hottest.cpu : 0;
+    checks.push({ what: 'Busiest worker thread', why: 'Each connection lives on one thread. A thread near 100% delays every peer it owns; add threads (--threads) before it saturates.',
+      val: hottest ? `${pct(hc)} (${hottest.name})` : '–', level: hc >= 90 ? 'critical' : hc >= 75 ? 'serious' : hc >= 60 ? 'warning' : 'good' });
+
+    const lw = cur.lockWaitPct || 0;
+    checks.push({ what: 'Lock contention', why: 'Time spent waiting for the shared tracker state. High wait means more threads stop helping.',
+      val: pct(lw) + ' of a core', level: lw >= 50 ? 'serious' : lw >= 20 ? 'warning' : 'good' });
+
+    // Mass disconnect: connections dropped > 30% within the last 5 minutes
+    let drop = 0;
+    if (hist && hist.t && hist.t.length > 2 && state.range !== '6h' && state.range !== '24h' && state.range !== '7d') {
+      const tEnd = hist.t[hist.t.length - 1]; let peak = 0;
+      hist.t.forEach((tv, i) => { if (tEnd - tv <= 300e3) peak = Math.max(peak, hist.websockets[i]); });
+      if (peak > 1000) drop = Math.max(0, (peak - cur.websockets) / peak * 100);
+    }
+    checks.push({ what: 'Connections stable', why: 'A fall of more than 30% in 5 minutes usually means the tracker or Cloudflare dropped clients.',
+      val: drop > 0.5 ? '−' + pct(drop) + ' in 5 min' : compact(cur.websockets) + ' open', level: drop >= 50 ? 'critical' : drop >= 30 ? 'serious' : 'good' });
+
+    const mem = cur.rssBytes || 0;
+    checks.push({ what: 'Memory', why: 'Resident memory grows with connections (~1.5 KB each). Steady growth at a flat connection count points to a leak.',
+      val: bytes(mem), level: mem >= 8 * 2 ** 30 ? 'serious' : mem >= 4 * 2 ** 30 ? 'warning' : 'good' });
+
+    const rl = (cur.rates && cur.rates.rateLimited) || 0;
+    checks.push({ what: 'Rate-limit closes', why: `Connections closed for sending more than ${cur.config ? cur.config.rateLimit : 50} msg/s. A burst can be a misbehaving client or an attack.`,
+      val: perSec(rl), level: rl >= 50 ? 'serious' : rl >= 5 ? 'warning' : 'good' });
+
+    const cr = cur.crossThreadPct || 0;
+    checks.push({ what: 'Cross-thread delivery', why: 'Share of messages handed to another thread. Expected ≈ (threads−1)/threads; informational.',
+      val: pct(cr), level: 'good', info: true });
+    return checks;
+  }
+
+  function renderHealth(checks) {
+    const list = document.getElementById('checks'); list.replaceChildren();
+    let worst = 'good';
+    for (const c of checks) {
+      if (!c.info && RANK[c.level] > RANK[worst]) worst = c.level;
+      const li = el('li'); const ic = el('span'); ic.append(statusIcon(c.level));
+      const text = el('div'); text.append(el('div', { class: 'what' }, c.what), el('div', { class: 'why' }, c.why));
+      const val = el('div', { class: 'val' }, c.val); val.append(el('span', { class: 'lvl' }, c.info ? 'Info' : LEVEL_LABEL[c.level]));
+      li.append(ic, text, val); list.append(li);
+    }
+    const badge = document.getElementById('badge'); badge.replaceChildren(statusIcon(worst), document.createTextNode(LEVEL_LABEL[worst]));
+    document.title = (worst === 'good' ? '' : '⚠ ') + 'Tracker status';
+  }
+
+  // ---------- tiles ----------
+  function renderTiles(cur) {
+    const tiles = document.getElementById('tiles'); tiles.replaceChildren();
+    if (!cur) return;
+    const r = cur.rates || {};
+    const items = [
+      { label: 'Open connections', value: compact(cur.websockets), hint: nf.format(cur.websockets), hero: true },
+      { label: 'Peers', value: compact(cur.peers), hint: compact(cur.memberships) + ' peer–torrent pairs' },
+      { label: 'Torrents', value: compact(cur.torrents), hint: compact(cur.seeders) + ' seeders · ' + compact(cur.leechers) + ' leechers' },
+      { label: 'Messages in', value: perSec(r.messagesIn), hint: perSec(r.messagesOut) + ' out' },
+      { label: 'CPU', value: pct(cur.cpuPercent), hint: (cur.config ? cur.config.threads : '?') + ' worker threads' },
+      { label: 'Memory', value: bytes(cur.rssBytes), hint: cur.websockets ? bytes(cur.rssBytes / cur.websockets) + ' per connection' : '' },
+    ];
+    for (const it of items) {
+      const d = el('div', { class: 'tile' + (it.hero ? ' hero' : '') });
+      d.append(el('div', { class: 'label' }, it.label), el('div', { class: 'value' }, it.value), el('div', { class: 'hint' }, it.hint));
+      tiles.append(d);
+    }
+  }
+
+  function renderThreads(cur) {
+    threadsEl.replaceChildren();
+    for (const th of (cur && cur.threads) || []) {
+      const row = el('div', { class: 'thread' });
+      const track = el('div', { class: 'track', role: 'img', 'aria-label': `${th.name}: ${pct(th.cpu)} CPU` });
+      const fill = el('div', { class: 'fill' + (th.cpu >= 90 ? ' crit' : th.cpu >= 75 ? ' warn' : '') });
+      fill.style.width = Math.min(100, th.cpu) + '%'; track.append(fill);
+      const num = el('div', { class: 'num' }, pct(th.cpu));
+      num.append(el('small', {}, th.name === 'acceptor' ? 'accepts' : compact(th.websockets) + ' conns'));
+      row.append(el('div', { class: 'name' }, th.name), track, num); threadsEl.append(row);
+    }
+  }
+
+  function renderSub(cur) {
+    const sub = document.getElementById('sub'); sub.replaceChildren();
+    if (!cur) { sub.append(el('span', {}, state.error ? 'Not responding: ' + state.error : 'Connecting…')); return; }
+    sub.append(el('span', {}, location.host || 'tracker'), el('span', {}, 'Up ' + duration(cur.uptimeSeconds)),
+      el('span', {}, (cur.config ? cur.config.threads : '?') + ' threads'), el('span', {}, 'Updated ' + new Date(cur.time).toLocaleTimeString()));
+  }
+
+  function renderAll() {
+    renderSub(state.current); renderTiles(state.current); renderThreads(state.current);
+    renderHealth(evaluate(state.current, state.history));
+    for (const def of CHARTS) {
+      renderChart(def, state.history);
+      if (chartEls[def.id].details.open) renderTable(def, chartEls[def.id].table);
+    }
+  }
+
+  // ---------- data ----------
+  async function getJSON(url) {
+    const ctl = new AbortController(); const timer = setTimeout(() => ctl.abort(), 8000);
+    try {
+      const res = await fetch(url, { cache: 'no-store', signal: ctl.signal });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return await res.json();
+    } finally { clearTimeout(timer); }
+  }
+  let historyAt = 0;
+  async function refresh(forceHistory) {
+    const longRange = state.range === '6h' || state.range === '24h' || state.range === '7d';
+    const needHistory = forceHistory || Date.now() - historyAt > (longRange ? 60e3 : 10e3);
+    if (forceHistory) Object.values(chartEls).forEach((c) => c.box.classList.add('loading'));
+    try {
+      const [cur, hist] = await Promise.all([getJSON('/stats/metrics.json'), needHistory ? getJSON('/stats/history.json?range=' + state.range) : null]);
+      state.current = cur.time ? cur : null; state.error = null; state.lastOk = Date.now();
+      if (hist) { state.history = hist; historyAt = Date.now(); }
+    } catch (e) {
+      state.error = e.name === 'AbortError' ? 'timed out' : (e.message || 'request failed');
+    }
+    Object.values(chartEls).forEach((c) => c.box.classList.remove('loading'));
+    const note = document.getElementById('rangeNote');
+    note.textContent = longRange ? '1-minute samples' : '5-second samples';
+    renderAll();
+  }
+
+  // range buttons
+  const rangeButtons = document.querySelectorAll('#ranges button');
+  function setRange(r) {
+    state.range = r;
+    rangeButtons.forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.range === r)));
+    try { localStorage.setItem('owt-range', r); } catch (e) {}
+    refresh(true);
+  }
+  rangeButtons.forEach((b) => b.addEventListener('click', () => setRange(b.dataset.range)));
+
+  let resizeTimer; window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderAll, 150); });
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', renderAll);
+
+  setRange(['15m', '1h', '6h', '24h', '7d'].includes(state.range) ? state.range : '1h');
+  setInterval(() => refresh(false), 5000);
+})();
+</script>
+</body>
+</html>
