@@ -18,6 +18,11 @@ struct TrackerOptions {
 	int maxOffers = 20;
 	// Announce interval sent to clients, in seconds
 	int announceInterval = 120;
+	// Each reply's interval is drawn from announceInterval ± this fraction, so
+	// clients that connected at the same moment (e.g. after a restart) don't
+	// keep announcing in lockstep. Capped at 0.5: the longest interval
+	// (1.5x) must stay below the 2x expiry timeout.
+	double announceIntervalJitter = 0.1;
 	// Maximum memberships (peer ID + torrent) per connection (0 = unlimited)
 	size_t maxSwarmsPerPeer = 1000;
 	// Scrape without info_hash returns every torrent: expensive on big trackers

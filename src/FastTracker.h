@@ -8,6 +8,7 @@
 #include <vector>
 #include <json.hpp>
 #include <algorithm>
+#include <cmath>
 #include <chrono>
 #include <random>
 
@@ -148,6 +149,18 @@ public:
 
 private:
 
+	// Announce interval for one reply: uniform in announceInterval ± jitter, whole seconds
+	int nextInterval() {
+		const int base = this->options.announceInterval;
+		const double jitter = std::clamp(this->options.announceIntervalJitter, 0.0, 0.5);
+		const int low = std::max(1, (int) std::lround(base * (1.0 - jitter)));
+		const int high = std::max(low, (int) std::lround(base * (1.0 + jitter)));
+		if (low == high) {
+			return low;
+		}
+		return std::uniform_int_distribution<int>(low, high)(this->rng);
+	}
+
 	// Running totals over all swarms (see getMembershipCount)
 	size_t membershipTotal = 0;
 	size_t seederTotal = 0;
@@ -247,7 +260,7 @@ private:
 
 		connection->sendMessage({
 			{"action", "announce"},
-			{"interval", this->options.announceInterval},
+			{"interval", this->nextInterval()},
 			{"info_hash", infoHash},
 			{"complete", swarm->getCompletedCount()},
 			{"incomplete", swarm->getIncompleteCount()},

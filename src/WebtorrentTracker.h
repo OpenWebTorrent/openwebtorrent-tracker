@@ -168,6 +168,7 @@ private:
 		this->metrics.config = {
 			{"threads", threads},
 			{"announceInterval", this->options.tracker.announceInterval},
+			{"announceJitterPercent", this->options.tracker.announceIntervalJitter * 100},
 			{"rateLimit", this->options.messageRate},
 			{"rateBurst", this->options.messageBurst},
 			{"maxTorrentsPerConnection", this->options.tracker.maxSwarmsPerPeer},

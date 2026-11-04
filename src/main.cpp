@@ -23,6 +23,7 @@ int main(int argc, char** argv) {
 		("max-torrents-per-connection", "Max torrents a connection can announce, across all its peer IDs (0 = unlimited)", cxxopts::value<size_t>()->default_value("1000"))
 		("allow-full-scrape", "Allow scrape requests without info_hash")
 		("announce-interval", "Announce interval in seconds (peers are dropped after 2 intervals without announcing)", cxxopts::value<int>()->default_value("120"))
+		("announce-jitter", "Randomize each reply's interval by up to this percent, so clients don't announce in lockstep (0-50)", cxxopts::value<double>()->default_value("10"))
 		("d,debug", "Debug", cxxopts::value<bool>()->default_value("false"))
 		("h,help", "Print usage")
 	;
@@ -46,6 +47,12 @@ int main(int argc, char** argv) {
 		int announceInterval = result["announce-interval"].as<int>();
 		if (announceInterval <= 0) {
 			std::cerr << "Announce interval must be positive" << std::endl;
+			return 1;
+		}
+
+		double announceJitter = result["announce-jitter"].as<double>();
+		if (!(announceJitter >= 0 && announceJitter <= 50)) {
+			std::cerr << "Announce jitter must be between 0 and 50 (percent)" << std::endl;
 			return 1;
 		}
 
@@ -81,6 +88,7 @@ int main(int argc, char** argv) {
 		serverOptions.tracker.maxSwarmsPerPeer = result["max-torrents-per-connection"].as<size_t>();
 		serverOptions.tracker.allowFullScrape = result.count("allow-full-scrape") > 0;
 		serverOptions.tracker.announceInterval = announceInterval;
+		serverOptions.tracker.announceIntervalJitter = announceJitter / 100.0;
 
 		bool debug = result["debug"].as<bool>();
 		if (debug) {

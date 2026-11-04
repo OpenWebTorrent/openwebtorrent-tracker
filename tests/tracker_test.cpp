@@ -113,7 +113,8 @@ static void testAnnounceResponse() {
 	tracker.processMessage(announce(IH1, peerId('a')), &a.ctx);
 	CHECK(a.inbox.size() == 1);
 	CHECK(a.inbox[0]["action"] == "announce");
-	CHECK(a.inbox[0]["interval"] == 120);
+	// Default jitter: 120 s ± 10%
+	CHECK(a.inbox[0]["interval"] >= 108 && a.inbox[0]["interval"] <= 132);
 	CHECK(a.inbox[0]["info_hash"] == IH1);
 	CHECK(a.inbox[0]["complete"] == 0);
 	CHECK(a.inbox[0]["incomplete"] == 1);
@@ -702,6 +703,52 @@ static void testIncrementalCleanup() {
 	CHECK(tracker.getMembershipCount() == 0);
 }
 
+// Reply intervals are spread over announceInterval ± jitter, and exact without jitter
+static void testAnnounceIntervalJitter() {
+	TrackerOptions options;
+	options.announceInterval = 120;
+	FastTracker tracker(options);
+	FakePeer a;
+	std::map<int, int> seen;
+	for (int i = 0; i < 2000; i++) {
+		tracker.processMessage(announce(IH1, peerId('a'), "update"), &a.ctx);
+		int interval = a.inbox.back()["interval"];
+		CHECK(interval >= 108 && interval <= 132);
+		seen[interval]++;
+	}
+	// Uniform over 25 values: every value shows up, none dominates
+	CHECK(seen.size() == 25);
+	for (const auto& [value, count] : seen) {
+		CHECK(count > 2000 / 25 / 3 && count < 2000 / 25 * 3);
+	}
+
+	options.announceIntervalJitter = 0;
+	FastTracker exact(options);
+	FakePeer b;
+	exact.processMessage(announce(IH1, peerId('b')), &b.ctx);
+	CHECK(b.inbox.back()["interval"] == 120);
+
+	// Out-of-range jitter is clamped to 50%: never above 1.5x (below the 2x expiry)
+	options.announceIntervalJitter = 5;
+	FastTracker clamped(options);
+	FakePeer c;
+	for (int i = 0; i < 500; i++) {
+		clamped.processMessage(announce(IH1, peerId('c'), "update"), &c.ctx);
+		int interval = c.inbox.back()["interval"];
+		CHECK(interval >= 60 && interval <= 180);
+	}
+
+	// Tiny intervals stay positive
+	options.announceInterval = 1;
+	options.announceIntervalJitter = 0.5;
+	FastTracker tiny(options);
+	FakePeer d;
+	for (int i = 0; i < 100; i++) {
+		tiny.processMessage(announce(IH1, peerId('d'), "update"), &d.ctx);
+		CHECK(d.inbox.back()["interval"] >= 1);
+	}
+}
+
 #define RUN(t) do { if (std::getenv("OWT_TEST_VERBOSE")) std::cerr << #t << std::endl; t(); } while (0)
 
 int main() {
@@ -724,6 +771,7 @@ int main() {
 	RUN(testRelayFramesMatchJson);
 	RUN(testCountersMatchWalk);
 	RUN(testIncrementalCleanup);
+	RUN(testAnnounceIntervalJitter);
 
 	if (failures) {
 		std::cerr << failures << " check(s) failed" << std::endl;

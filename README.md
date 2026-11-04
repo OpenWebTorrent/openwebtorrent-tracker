@@ -48,6 +48,7 @@ You can run it with the command below:
 | `--no-ssl` | | Serve plain `ws://`, e.g. behind a TLS-terminating reverse proxy |
 | `-t, --threads` | `0` | Worker threads; `0` = one per CPU core. Falls back to the `OWT_THREADS` environment variable |
 | `--announce-interval` | `120` | Announce interval sent to clients, in seconds. Peers that don't announce for 2 intervals are dropped |
+| `--announce-jitter` | `10` | Randomize each reply's interval by up to this percent (0-50), so clients that connected together (e.g. after a restart) don't keep announcing in lockstep |
 | `-d, --debug` | | Log every message |
 
 ### Limits
