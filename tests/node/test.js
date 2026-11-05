@@ -145,6 +145,31 @@ test('stats and 404', async () => {
   s.close()
 })
 
+test('protocol errors are counted per reason in the metrics', async () => {
+  const s = await connect()
+  for (let i = 0; i < 3; i++) s.json({ action: 'bogus' })
+  const failed = () => s.messages.filter((m) => m['failure reason'] === 'unknown action').length
+  for (let tries = 0; tries < 20 && failed() < 3; tries++) await wait(50)
+  assert.strictEqual(failed(), 3)
+
+  // Metrics are sampled every 5 s
+  const reasonOf = (metrics, key) => (metrics.failureReasons || []).find((r) => r.reason === key)
+  let metrics
+  for (let tries = 0; tries < 30; tries++) {
+    metrics = await (await fetch(`http://127.0.0.1:${PORT}/stats/metrics.json`)).json()
+    if ((reasonOf(metrics, 'unknown_action') || {}).total >= 3) break
+    await wait(500)
+  }
+  const reason = reasonOf(metrics, 'unknown_action')
+  assert.ok(reason, 'unknown_action in failureReasons')
+  assert.ok(reason.total >= 3)
+  assert.strictEqual(reason.message, 'unknown action')
+  assert.ok(reason.windowCount >= 3)
+  const sum = metrics.failureReasons.reduce((n, r) => n + r.total, 0)
+  assert.strictEqual(sum, metrics.totals.failures)
+  s.close()
+})
+
 test('full scrape is disabled by default', async () => {
   const s = await connect()
   s.json({ action: 'scrape' })

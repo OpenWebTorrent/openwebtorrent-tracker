@@ -530,6 +530,7 @@ private:
 				// Protocol errors are reported to the client, like bittorrent-tracker does
 				DOUT("Error: " << e.what());
 				WorkerCounters::add(localCounters->failures);
+				WorkerCounters::add(localCounters->failureReasons[static_cast<size_t>(e.reason())]);
 				peer->sendMessage(this->failureMessage(data, e.what()));
 			} catch (const std::exception& e) {
 				EOUT("Error: " << e.what());

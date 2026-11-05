@@ -139,6 +139,9 @@ th { position: sticky; top: 0; background: var(--surface); color: var(--ink-2); 
 .checks .val { font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 600; white-space: nowrap; }
 .checks .lvl { font-size: 12px; color: var(--ink-2); font-weight: 400; display: block; text-align: right; }
 .span2 { grid-column: 1 / -1; }
+.reasons .tablewrap { max-height: none; margin-top: 0; }
+.reasons td:first-child { white-space: normal; min-width: 220px; }
+.reasons td small { display: block; color: var(--muted); font-size: 11px; }
 footer { color: var(--muted); font-size: 12px; margin-top: 20px; }
 footer code { font-size: 12px; }
 </style>
@@ -263,7 +266,7 @@ footer code { font-size: 12px; }
       series: [{ key: 'lockWaitPct', label: 'Waiting' }, { key: 'lockHeldPct', label: 'Holding' }], fmt: pct },
     { id: 'churn', title: 'Connection churn', desc: 'Connections opened and closed per second. A spike in closes with a drop in connections is a mass disconnect.',
       series: [{ key: 'opened', label: 'Opened' }, { key: 'closed', label: 'Closed' }], fmt: perSec },
-    { id: 'abuse', title: 'Rejected traffic', desc: 'Connections closed for exceeding the rate limit or sending invalid JSON, and protocol errors sent back.',
+    { id: 'abuse', title: 'Rejected traffic', desc: 'Connections closed for exceeding the rate limit or sending invalid JSON, and protocol errors sent back (broken down by reason below).',
       series: [{ key: 'rateLimited', label: 'Rate limited' }, { key: 'invalid', label: 'Invalid JSON' }, { key: 'failures', label: 'Protocol errors' }], fmt: perSec },
     { id: 'bw', title: 'Bandwidth', desc: 'WebSocket payload bytes per second (before Cloudflare).',
       series: [{ key: 'bytesIn', label: 'In' }, { key: 'bytesOut', label: 'Out' }], fmt: (n) => bytes(n, '/s') },
@@ -299,6 +302,12 @@ footer code { font-size: 12px; }
   threadCard.append(el('h2', {}, 'Threads'), el('p', { class: 'desc' }, 'CPU per thread (100% = the thread\'s whole core) and connections it owns. One thread pinned near 100% is the bottleneck.'));
   const threadsEl = el('div', { class: 'threads' }); threadCard.append(threadsEl);
   chartsEl.insertBefore(threadCard, chartsEl.children[1]);
+  // Protocol errors by reason (after the charts)
+  const reasonsCard = el('div', { class: 'card span2 reasons' });
+  const reasonsDesc = el('p', { class: 'desc' });
+  const reasonsEl = el('div', { class: 'tablewrap' });
+  reasonsCard.append(el('h2', {}, 'Protocol errors by reason'), reasonsDesc, reasonsEl);
+  chartsEl.append(reasonsCard);
 
   // ---------- line chart with crosshair tooltip ----------
   function niceMax(v) {
@@ -515,6 +524,29 @@ footer code { font-size: 12px; }
     }
   }
 
+  function renderReasons(cur) {
+    reasonsEl.replaceChildren();
+    const all = (cur && cur.failureReasons) || [];
+    const ws = cur ? cur.failureWindowSeconds : 0;
+    const win = !ws ? '' : ws < 60 ? ws + ' s' : Math.round(ws / 60) + ' min';
+    reasonsDesc.textContent = 'Requests rejected with a "failure reason" (the connection stays open). ' +
+      (win ? `Counts and rates over the last ${win}; totals since the tracker started.` : 'Totals since the tracker started.');
+    const rows = all.filter((r) => r.total > 0).sort((a, b) => b.windowCount - a.windowCount || b.total - a.total);
+    if (!rows.length) { reasonsEl.append(el('p', { class: 'note', style: 'margin: 8px 10px' }, cur ? 'No protocol errors since the tracker started.' : 'No data yet.')); return; }
+    const windowSum = rows.reduce((n, r) => n + r.windowCount, 0);
+    const table = el('table'); const head = el('tr');
+    for (const h of ['Reason', 'Last ' + (win || 'window'), 'Rate', 'Share', 'Since start']) head.append(el('th', {}, h));
+    const thead = el('thead'); thead.append(head); table.append(thead);
+    const tb = el('tbody');
+    for (const r of rows) {
+      const tr = el('tr'); const what = el('td', {}, r.message); what.append(el('small', {}, r.reason));
+      tr.append(what, el('td', {}, nf.format(r.windowCount)), el('td', {}, r.windowRate >= 0.1 ? perSec(r.windowRate) : (r.windowCount ? '< 0.1/s' : '–')),
+        el('td', {}, windowSum ? pct(100 * r.windowCount / windowSum) : '–'), el('td', {}, compact(r.total)));
+      tb.append(tr);
+    }
+    table.append(tb); reasonsEl.append(table);
+  }
+
   function renderSub(cur) {
     const sub = document.getElementById('sub'); sub.replaceChildren();
     if (!cur) { sub.append(el('span', {}, state.error ? 'Not responding: ' + state.error : 'Connecting…')); return; }
@@ -523,7 +555,7 @@ footer code { font-size: 12px; }
   }
 
   function renderAll() {
-    renderSub(state.current); renderTiles(state.current); renderThreads(state.current);
+    renderSub(state.current); renderTiles(state.current); renderThreads(state.current); renderReasons(state.current);
     renderHealth(evaluate(state.current, state.history));
     for (const def of CHARTS) {
       renderChart(def, state.history);

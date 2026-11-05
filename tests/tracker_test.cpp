@@ -9,9 +9,11 @@
 #include <random>
 #include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "FastTracker.h"
+#include "Metrics.h"
 
 using namespace owt;
 
@@ -749,6 +751,159 @@ static void testAnnounceIntervalJitter() {
 	}
 }
 
+// The reason a message fails with, or nullopt-like "none" if it doesn't
+static std::string failureOf(FastTracker& tracker, const json& data, PeerContext* peer) {
+	try {
+		tracker.processMessage(data, peer);
+	} catch (const TrackerException& e) {
+		return failureReasonKey(e.reason());
+	}
+	return "none";
+}
+
+static void testFailureReasons() {
+	// Keys are unique identifiers, every reason has a message
+	std::set<std::string> keys;
+	for (size_t i = 0; i < FAILURE_REASON_COUNT; i++) {
+		FailureReason reason = static_cast<FailureReason>(i);
+		std::string key = failureReasonKey(reason);
+		CHECK(!key.empty() && key.find_first_not_of("abcdefghijklmnopqrstuvwxyz_") == std::string::npos);
+		CHECK(keys.insert(key).second);
+		CHECK(std::string(failureReasonMessage(reason)).size() > 5);
+		CHECK(std::string(TrackerException(reason).what()) == failureReasonMessage(reason));
+	}
+
+	TrackerOptions options;
+	options.maxSwarmsPerPeer = 2;
+	options.maxScrapeInfoHashes = 2;
+	FastTracker tracker(options);
+	FakePeer p, other;
+	tracker.processMessage(announce(IH1, peerId('o')), &other.ctx);
+
+	json badOffer = announce(IH1, peerId('p'), "started", 1);
+	badOffer["offers"][0]["offer"] = "x";
+	json badOfferSdp = announce(IH1, peerId('p'), "started", 1);
+	badOfferSdp["offers"][0]["offer"].erase("sdp");
+	json noOfferId = answerMessage(IH1, peerId('p'), peerId('o'), "s");
+	noOfferId.erase("offer_id");
+	json badAnswer = answerMessage(IH1, peerId('p'), peerId('o'), "s");
+	badAnswer["answer"] = {{"type", "answer"}};
+	json answerBadToPeer = answerMessage(IH1, peerId('p'), "short", "s");
+	json stopBadPeer = {{"action", "announce"}, {"event", "stopped"}, {"info_hash", IH1}, {"peer_id", 5}};
+
+	// Client-visible messages are unchanged from the plain-string version
+	const std::vector<std::tuple<json, std::string, std::string>> cases = {
+		{json::array(), "not_object", "message must be a JSON object"},
+		{{{"action", 5}}, "action_not_string", "action field must be a string"},
+		{{{"action", "announce"}, {"event", 5}}, "event_not_string", "event field must be a string"},
+		{announce(IH1, peerId('p'), "bogus"), "unknown_event", "unknown announce event"},
+		{{{"action", "unknown"}}, "unknown_action", "unknown action"},
+		{announce("short", peerId('p')), "announce_info_hash", "info_hash field is missing or wrong"},
+		{announce(IH1, "short"), "announce_peer_id", "peer_id field is missing or wrong"},
+		{{{"action", "announce"}, {"info_hash", IH1}, {"peer_id", peerId('p')}, {"offers", "x"}}, "offers_not_array", "announce: offers field is not an array"},
+		{answerMessage("short", peerId('p'), peerId('o'), "s"), "answer_info_hash", "info_hash field is missing or wrong"},
+		{answerMessage(IH1, "short", peerId('o'), "s"), "answer_peer_id", "peer_id field is missing or wrong"},
+		{answerBadToPeer, "answer_to_peer_id", "to_peer_id field is missing or wrong"},
+		{badAnswer, "bad_answer", "answer: answer field is missing or wrong"},
+		{noOfferId, "bad_offer_id", "answer: offer_id field is missing or wrong"},
+		{answerMessage(IH1, peerId('p'), peerId('o'), "s"), "answer_not_in_swarm", "answer: peer_id is not in the swarm on this connection"},
+		{{{"action", "announce"}, {"event", "stopped"}}, "stop_info_hash", "info_hash field is missing or wrong"},
+		{stopBadPeer, "stop_peer_id", "peer_id field is missing or wrong"},
+		{{{"action", "scrape"}}, "full_scrape_disabled", "scrape: full scrape is disabled"},
+		{{{"action", "scrape"}, {"info_hash", {IH1, IH2, IH1}}}, "too_many_scrape_hashes", "scrape: too many info_hash values"},
+		{{{"action", "scrape"}, {"info_hash", 5}}, "bad_scrape_info_hash", "scrape: info_hash field is wrong"},
+	};
+	std::set<std::string> seen;
+	for (const auto& [data, key, message] : cases) {
+		std::string got = failureOf(tracker, data, &p.ctx);
+		if (got != key) {
+			std::cerr << "  expected " << key << ", got " << got << " for " << data.dump() << std::endl;
+		}
+		CHECK(got == key);
+		seen.insert(key);
+		for (size_t i = 0; i < FAILURE_REASON_COUNT; i++) {
+			if (failureReasonKey(static_cast<FailureReason>(i)) == key) {
+				CHECK(failureReasonMessage(static_cast<FailureReason>(i)) == message);
+			}
+		}
+	}
+
+	// Offers are validated after joining the swarm, so these use another connection
+	FakePeer q;
+	badOffer["peer_id"] = badOfferSdp["peer_id"] = peerId('q');
+	CHECK(failureOf(tracker, badOffer, &q.ctx) == "bad_offer");
+	CHECK(failureOf(tracker, badOfferSdp, &q.ctx) == "bad_offer_sdp");
+	CHECK(countOffers(other) == 0);
+	seen.insert("bad_offer");
+	seen.insert("bad_offer_sdp");
+
+	// Torrent limit (p is in no swarm yet: every case above failed before joining)
+	CHECK(p.ctx.membershipCount == 0);
+	tracker.processMessage(announce(IH1, peerId('p')), &p.ctx);
+	tracker.processMessage(announce(IH2, peerId('p')), &p.ctx);
+	CHECK(failureOf(tracker, announce(std::string(20, 'c'), peerId('p')), &p.ctx) == "too_many_torrents");
+	seen.insert("too_many_torrents");
+
+	// Every reason is covered by a case
+	CHECK(seen.size() == FAILURE_REASON_COUNT);
+}
+
+static void testFailureReasonMetrics() {
+	Metrics metrics;
+	metrics.init(1);
+	const size_t answerNotInSwarm = static_cast<size_t>(FailureReason::AnswerNotInSwarm);
+	const size_t badOffer = static_cast<size_t>(FailureReason::BadOffer);
+
+	auto sample = [&](int64_t timeMs, uint64_t notInSwarm, uint64_t offers) {
+		MetricsSample s;
+		s.timeMs = timeMs;
+		s.failureReasons[answerNotInSwarm] = notInSwarm;
+		s.failureReasons[badOffer] = offers;
+		s.failures = notInSwarm + offers;
+		metrics.record(s);
+	};
+	auto reasonOf = [](const json& current, const char* key) {
+		for (const auto& r : current["failureReasons"]) {
+			if (r["reason"] == key) return r;
+		}
+		return json();
+	};
+
+	// One sample: nothing to compare against yet
+	sample(1000000, 100, 0);
+	json current = json::parse(*metrics.current());
+	CHECK(current["failureReasons"].size() == FAILURE_REASON_COUNT);
+	CHECK(reasonOf(current, "answer_not_in_swarm")["total"] == 100);
+	CHECK(reasonOf(current, "answer_not_in_swarm")["windowCount"] == 0);
+	CHECK(reasonOf(current, "answer_not_in_swarm")["rate"] == 0.0);
+
+	// 5 s samples for 20 minutes: 2 failures per sample, one bad offer per minute
+	int64_t t = 1000000;
+	uint64_t n = 100, offers = 0;
+	for (int i = 1; i <= 240; i++) {
+		t += 5000;
+		n += 2;
+		if (i % 12 == 0) offers++;
+		sample(t, n, offers);
+	}
+	current = json::parse(*metrics.current());
+	json r = reasonOf(current, "answer_not_in_swarm");
+	CHECK(r["message"] == "answer: peer_id is not in the swarm on this connection");
+	CHECK(r["total"] == n);
+	CHECK(r["rate"] == 0.4);              // 2 per 5 s
+	CHECK(r["windowCount"] == 360);       // 15 min window = 180 samples
+	CHECK(r["windowRate"] == 0.4);
+	CHECK(current["failureWindowSeconds"] == 900);
+	json o = reasonOf(current, "bad_offer");
+	CHECK(o["total"] == 20);
+	CHECK(o["windowCount"] == 15);
+	CHECK(reasonOf(current, "unknown_action")["total"] == 0);
+	// Sum of reasons matches the total counter
+	uint64_t sum = 0;
+	for (const auto& x : current["failureReasons"]) sum += x["total"].get<uint64_t>();
+	CHECK(sum == current["totals"]["failures"].get<uint64_t>());
+}
+
 #define RUN(t) do { if (std::getenv("OWT_TEST_VERBOSE")) std::cerr << #t << std::endl; t(); } while (0)
 
 int main() {
@@ -772,6 +927,8 @@ int main() {
 	RUN(testCountersMatchWalk);
 	RUN(testIncrementalCleanup);
 	RUN(testAnnounceIntervalJitter);
+	RUN(testFailureReasons);
+	RUN(testFailureReasonMetrics);
 
 	if (failures) {
 		std::cerr << failures << " check(s) failed" << std::endl;

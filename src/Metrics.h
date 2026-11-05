@@ -2,6 +2,7 @@
 #define OWT_METRICS_H
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <chrono>
@@ -14,6 +15,7 @@
 #include <string>
 #include <vector>
 #include <json.hpp>
+#include "TrackerException.h"
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -36,8 +38,9 @@ struct alignas(64) WorkerCounters {
 	std::atomic<uint64_t> announces{0};
 	std::atomic<uint64_t> answers{0};
 	std::atomic<uint64_t> scrapes{0};
-	// Protocol errors reported to clients ("failure reason")
+	// Protocol errors reported to clients ("failure reason"), in total and per reason
 	std::atomic<uint64_t> failures{0};
+	std::atomic<uint64_t> failureReasons[FAILURE_REASON_COUNT]{};
 	// Connections closed for exceeding --rate-limit / sending invalid JSON
 	std::atomic<uint64_t> rateLimited{0};
 	std::atomic<uint64_t> invalid{0};
@@ -71,6 +74,7 @@ struct MetricsSample {
 	uint64_t messagesIn = 0, bytesIn = 0, messagesOut = 0, bytesOut = 0, crossThreadOut = 0;
 	uint64_t announces = 0, answers = 0, scrapes = 0, failures = 0, rateLimited = 0, invalid = 0;
 	uint64_t lockWaitNs = 0, lockHeldNs = 0;
+	std::array<uint64_t, FAILURE_REASON_COUNT> failureReasons{};
 
 	// CPU time in clock ticks: whole process, and per thread (workers, then acceptor)
 	uint64_t processTicks = 0;
@@ -86,6 +90,9 @@ public:
 	static constexpr size_t FINE_CAPACITY = 720;
 	static constexpr size_t COARSE_EVERY = 12;
 	static constexpr size_t COARSE_CAPACITY = 7 * 24 * 60;
+	// Window for the per-reason failure rates (individual reasons are too rare
+	// for a 5 s rate to mean much)
+	static constexpr int64_t FAILURE_WINDOW_MS = 15 * 60 * 1000;
 
 	size_t threadCount = 0;
 	std::unique_ptr<WorkerCounters[]> workers;
@@ -138,6 +145,9 @@ public:
 			sample.answers += r(w.answers);
 			sample.scrapes += r(w.scrapes);
 			sample.failures += r(w.failures);
+			for (size_t f = 0; f < FAILURE_REASON_COUNT; f++) {
+				sample.failureReasons[f] += r(w.failureReasons[f]);
+			}
 			sample.rateLimited += r(w.rateLimited);
 			sample.invalid += r(w.invalid);
 			sample.lockWaitNs += r(w.lockWaitNs);
@@ -307,6 +317,29 @@ private:
 
 		uint64_t sent = b.messagesOut - std::min(b.messagesOut, a.messagesOut);
 		uint64_t cross = b.crossThreadOut - std::min(b.crossThreadOut, a.crossThreadOut);
+
+		// Oldest fine sample within the failure window (the first one if the
+		// tracker hasn't been up that long)
+		const MetricsSample* windowStart = &this->fine.front();
+		for (auto it = this->fine.rbegin(); it != this->fine.rend(); ++it) {
+			if (b.timeMs - it->timeMs > FAILURE_WINDOW_MS) break;
+			windowStart = &*it;
+		}
+		double windowSeconds = std::max(0.001, (b.timeMs - windowStart->timeMs) / 1000.0);
+		json failureReasons = json::array();
+		for (size_t f = 0; f < FAILURE_REASON_COUNT; f++) {
+			FailureReason reason = static_cast<FailureReason>(f);
+			uint64_t inWindow = b.failureReasons[f] - std::min(b.failureReasons[f], windowStart->failureReasons[f]);
+			failureReasons.push_back({
+				{"reason", failureReasonKey(reason)},
+				{"message", failureReasonMessage(reason)},
+				{"rate", rate(a.failureReasons[f], b.failureReasons[f])},
+				{"windowCount", inWindow},
+				{"windowRate", round1(inWindow / windowSeconds)},
+				{"total", b.failureReasons[f]}
+			});
+		}
+
 		return {
 			{"time", b.timeMs},
 			{"startTime", this->startTimeMs},
@@ -336,6 +369,8 @@ private:
 				{"rateLimited", rate(a.rateLimited, b.rateLimited)},
 				{"invalid", rate(a.invalid, b.invalid)}
 			}},
+			{"failureReasons", failureReasons},
+			{"failureWindowSeconds", (int64_t) std::round(windowSeconds)},
 			{"crossThreadPct", sent ? round1(100.0 * cross / sent) : 0.0},
 			{"lockWaitPct", round1((b.lockWaitNs - std::min(b.lockWaitNs, a.lockWaitNs)) / (seconds * 1e7))},
 			{"lockHeldPct", round1((b.lockHeldNs - std::min(b.lockHeldNs, a.lockHeldNs)) / (seconds * 1e7))},

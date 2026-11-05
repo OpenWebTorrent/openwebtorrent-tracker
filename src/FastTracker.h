@@ -61,13 +61,13 @@ public:
 
 	void processMessage(const json& data, PeerContext* peer) override {
 		if (!data.is_object()) {
-			throw TrackerException("message must be a JSON object");
+			throw TrackerException(FailureReason::NotObject);
 		}
 
-		std::string action = optionalString(data, "action");
+		std::string action = optionalString(data, "action", FailureReason::ActionNotString);
 
 		if (action == "announce") {
-			std::string event = optionalString(data, "event");
+			std::string event = optionalString(data, "event", FailureReason::EventNotString);
 
 			if (event == "" || event == "update" || event == "paused") {
 				if (data.contains("answer")) {
@@ -82,12 +82,12 @@ public:
 			} else if (event == "completed") {
 				this->processAnnounce(data, peer, true);
 			} else {
-				throw TrackerException("unknown announce event");
+				throw TrackerException(FailureReason::UnknownEvent);
 			}
 		} else if (action == "scrape") {
 			this->processScrape(data, peer);
 		} else {
-			throw TrackerException("unknown action");
+			throw TrackerException(FailureReason::UnknownAction);
 		}
 	}
 
@@ -192,22 +192,22 @@ private:
 	}
 
 	// Returns the string value of an optional field, "" if missing or null
-	static std::string optionalString(const json& data, const char* key) {
+	static std::string optionalString(const json& data, const char* key, FailureReason reason) {
 		auto it = data.find(key);
 		if (it == data.end() || it->is_null()) {
 			return "";
 		}
 		if (!it->is_string()) {
-			throw TrackerException(std::string(key) + " field must be a string");
+			throw TrackerException(reason);
 		}
 		return it->get<std::string>();
 	}
 
 	// info_hash and peer_id are 20-byte binary strings (one code point per byte)
-	static std::string requireBinaryId(const json& data, const char* key) {
+	static std::string requireBinaryId(const json& data, const char* key, FailureReason reason) {
 		auto it = data.find(key);
 		if (it == data.end() || !it->is_string() || Utils::binaryStringLength(it->get_ref<const std::string&>()) != 20) {
-			throw TrackerException(std::string(key) + " field is missing or wrong");
+			throw TrackerException(reason);
 		}
 		return it->get<std::string>();
 	}
@@ -228,18 +228,18 @@ private:
 
 	void processAnnounce(const json& data, PeerContext* connection, bool completed = false, bool paused = false) {
 		// Validate params
-		std::string infoHash = requireBinaryId(data, "info_hash");
-		std::string peerId = requireBinaryId(data, "peer_id");
+		std::string infoHash = requireBinaryId(data, "info_hash", FailureReason::AnnounceInfoHash);
+		std::string peerId = requireBinaryId(data, "peer_id", FailureReason::AnnouncePeerId);
 
 		auto offersIt = data.find("offers");
 		if (offersIt != data.end() && !offersIt->is_array()) {
-			throw TrackerException("announce: offers field is not an array");
+			throw TrackerException(FailureReason::OffersNotArray);
 		}
 
 		// Limit checked before any state changes
 		size_t maxMemberships = this->options.maxSwarmsPerPeer;
 		if (maxMemberships > 0 && !connection->hasMembership(peerId, infoHash) && connection->membershipCount >= maxMemberships) {
-			throw TrackerException("announce: too many torrents on this connection");
+			throw TrackerException(FailureReason::TooManyTorrents);
 		}
 
 		this->claimPeerId(connection, peerId);
@@ -273,21 +273,21 @@ private:
 
 	void processAnswer(const json& data, PeerContext* connection) {
 		// Validate params
-		std::string infoHash = requireBinaryId(data, "info_hash");
-		std::string peerId = requireBinaryId(data, "peer_id");
-		std::string toPeerId = requireBinaryId(data, "to_peer_id");
+		std::string infoHash = requireBinaryId(data, "info_hash", FailureReason::AnswerInfoHash);
+		std::string peerId = requireBinaryId(data, "peer_id", FailureReason::AnswerPeerId);
+		std::string toPeerId = requireBinaryId(data, "to_peer_id", FailureReason::AnswerToPeerId);
 
 		const json& answer = data["answer"];
 		if (!answer.is_object() || !answer.contains("sdp") || !answer["sdp"].is_string()) {
-			throw TrackerException("answer: answer field is missing or wrong");
+			throw TrackerException(FailureReason::BadAnswer);
 		}
 		if (!data.contains("offer_id") || !data["offer_id"].is_string()) {
-			throw TrackerException("answer: offer_id field is missing or wrong");
+			throw TrackerException(FailureReason::BadOfferId);
 		}
 
 		// The sender must have announced this torrent with this peer ID on this connection
 		if (!connection->hasMembership(peerId, infoHash)) {
-			throw TrackerException("answer: peer_id is not in the swarm on this connection");
+			throw TrackerException(FailureReason::AnswerNotInSwarm);
 		}
 
 		// The target may have just left, which is a normal race, so the
@@ -304,8 +304,8 @@ private:
 
 	void processStop(const json& data, PeerContext* connection) {
 		// Validate params
-		std::string infoHash = requireBinaryId(data, "info_hash");
-		std::string peerId = requireBinaryId(data, "peer_id");
+		std::string infoHash = requireBinaryId(data, "info_hash", FailureReason::StopInfoHash);
+		std::string peerId = requireBinaryId(data, "peer_id", FailureReason::StopPeerId);
 
 		// Ignored if this connection doesn't own that membership
 		this->removeMembership(connection, peerId, infoHash);
@@ -338,14 +338,14 @@ private:
 		auto infoHashIt = data.find("info_hash");
 		if (infoHashIt == data.end() || infoHashIt->is_null()) {
 			if (!this->options.allowFullScrape) {
-				throw TrackerException("scrape: full scrape is disabled");
+				throw TrackerException(FailureReason::FullScrapeDisabled);
 			}
 			for (const auto& entry : this->swarms) {
 				addFile(entry.first);
 			}
 		} else if (infoHashIt->is_array()) {
 			if (infoHashIt->size() > this->options.maxScrapeInfoHashes) {
-				throw TrackerException("scrape: too many info_hash values");
+				throw TrackerException(FailureReason::TooManyScrapeHashes);
 			}
 			for (const auto& item : *infoHashIt) {
 				if (isValidInfoHash(item)) {
@@ -355,7 +355,7 @@ private:
 		} else if (isValidInfoHash(*infoHashIt)) {
 			addFile(infoHashIt->get<std::string>());
 		} else {
-			throw TrackerException("scrape: info_hash field is wrong");
+			throw TrackerException(FailureReason::BadScrapeInfoHash);
 		}
 
 		peer->sendMessage({
@@ -451,11 +451,11 @@ private:
 			const json& item = offers[i];
 			if (!item.is_object() || !item.contains("offer_id") || !item["offer_id"].is_string() ||
 					!item.contains("offer") || !item["offer"].is_object()) {
-				throw TrackerException("announce: wrong offer item format");
+				throw TrackerException(FailureReason::BadOffer);
 			}
 			const json& offer = item["offer"];
 			if (!offer.contains("sdp") || !offer["sdp"].is_string()) {
-				throw TrackerException("announce: wrong offer item field format");
+				throw TrackerException(FailureReason::BadOfferSdp);
 			}
 		}
 
