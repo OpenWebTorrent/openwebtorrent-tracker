@@ -14,6 +14,7 @@
 
 #include "FastTracker.h"
 #include "Metrics.h"
+#include "FailureSamples.h"
 
 using namespace owt;
 
@@ -904,6 +905,116 @@ static void testFailureReasonMetrics() {
 	CHECK(sum == current["totals"]["failures"].get<uint64_t>());
 }
 
+static void testFailureSampleSummary() {
+	// A rejected announce with offers: the summary describes fields, never SDP
+	json data = announce("not-a-binary-info-hash-but-hex-0123456789abcdef", peerId('p'), "started", 2);
+	data["offers"][0]["offer"]["sdp"] = "v=0 c=IN IP4 203.0.113.7 a=candidate:1 1 udp 2122260223 198.51.100.4 54400 typ host";
+	json summary = FailureSamples::summarize(data);
+	std::string text = summary.dump();
+	CHECK(text.find("203.0.113.7") == std::string::npos);
+	CHECK(text.find("198.51.100.4") == std::string::npos);
+	CHECK(text.find("candidate") == std::string::npos);
+	CHECK(summary["keys"].size() == data.size());
+	CHECK(summary["action"]["preview"] == "announce");
+	CHECK(summary["offers"]["type"] == "array");
+	CHECK(summary["offers"]["size"] == 2);
+	CHECK(summary["offers"]["first"]["type"] == "object");
+	CHECK(summary["firstOffer"]["offer"]["type"] == "object");
+	CHECK(summary["firstOffer"]["offer"]["keys"] == json::array({"sdp", "type"}));
+	CHECK(summary["firstOffer"]["offer_id"]["preview"] == "o0");
+
+	// Long strings are cut to a preview; binary length and hex detection
+	json ih = summary["info_hash"];
+	CHECK(ih["bytes"] == 47);
+	CHECK(ih["binaryChars"] == 47);
+	CHECK(ih["preview"] == "not-a-binary-info-hash-but-hex-0123456789abcdef");
+	CHECK(!ih.contains("hex"));
+	json hex = FailureSamples::describe(std::string(40, 'a') + std::string(20, 'F'));
+	CHECK(hex["hex"] == true);
+	CHECK(hex["bytes"] == 60);
+	CHECK(hex["preview"].get<std::string>() == std::string(40, 'a') + std::string(8, 'F') + "…");
+
+	// Preview never splits a UTF-8 character: 47 ASCII bytes + "é" (2 bytes)
+	std::string accented = std::string(47, 'x') + "\xc3\xa9" + "tail";
+	CHECK(FailureSamples::describe(accented)["preview"].get<std::string>() == std::string(47, 'x') + "…");
+	CHECK(FailureSamples::describe(std::string("\xe2\x82\xac"))["binaryChars"] == -1);
+
+	// Non-strings
+	CHECK(FailureSamples::describe(5)["type"] == "number");
+	CHECK(FailureSamples::describe(5)["value"] == 5);
+	CHECK(FailureSamples::describe(json::array({json::array({1})}))["first"]["first"]["type"] == "number");
+	CHECK(FailureSamples::summarize(json::array())["type"] == "array");
+	json many = json::object();
+	for (int i = 0; i < 40; i++) many["k" + std::to_string(i)] = i;
+	CHECK(FailureSamples::summarize(many)["keys"].size() == FailureSamples::MAX_KEYS);
+}
+
+static void testFailureSampleStore() {
+	FailureSamples samples;
+	// One sample per reason per interval
+	CHECK(samples.shouldSample(FailureReason::BadOffer));
+	CHECK(!samples.shouldSample(FailureReason::BadOffer));
+	CHECK(samples.shouldSample(FailureReason::UnknownAction));
+
+	// Keeps the last PER_REASON, newest first
+	for (int i = 0; i < 30; i++) {
+		samples.record(FailureReason::BadOffer, {{"n", i}});
+	}
+	json dump = json::parse(samples.dump());
+	CHECK(dump.size() == 1);
+	CHECK(dump["bad_offer"].size() == FailureSamples::PER_REASON);
+	CHECK(dump["bad_offer"][0]["n"] == 29);
+	CHECK(dump["bad_offer"].back()["n"] == 10);
+	CHECK(json::parse(FailureSamples().dump()).empty());
+}
+
+static void testFailureDiagnosis() {
+	FastTracker tracker;
+	FakePeer a, b, a2;
+	tracker.processMessage(announce(IH1, peerId('a')), &a.ctx);
+	tracker.processMessage(announce(IH1, peerId('b')), &b.ctx);
+
+	// Answer for a torrent the sender never announced on this connection
+	json answer = answerMessage(IH2, peerId('a'), peerId('b'), "s");
+	json d = tracker.diagnose(answer, &a.ctx);
+	CHECK(d["connectionTorrents"] == 1);
+	CHECK(d["connectionPeerIds"] == 1);
+	CHECK(d["peerIdConnection"] == "this");
+	CHECK(d["peerIdOnThisConnection"] == true);
+	CHECK(d["swarmExists"] == false);
+	CHECK(!d.contains("peerInSwarm"));
+
+	// The peer ID reconnected on a2: the old connection answers
+	tracker.processMessage(announce(IH1, peerId('a')), &a2.ctx);
+	d = tracker.diagnose(answerMessage(IH1, peerId('a'), peerId('b'), "s"), &a.ctx);
+	CHECK(d["peerIdConnection"] == "other");
+	CHECK(d["peerInSwarm"] == "other");
+	CHECK(d["toPeerInSwarm"] == true);
+	CHECK(d["swarmPeers"] == 2);
+
+	// Unknown peer, and non-object requests
+	d = tracker.diagnose(answerMessage(IH1, peerId('z'), peerId('y'), "s"), &b.ctx);
+	CHECK(d["peerIdConnection"] == "none");
+	CHECK(d["peerIdOnThisConnection"] == false);
+	CHECK(d["peerInSwarm"] == "no");
+	CHECK(d["toPeerInSwarm"] == false);
+	CHECK(tracker.diagnose(json::array(), &b.ctx).size() == 2);
+	CHECK(tracker.diagnose({{"peer_id", 5}}, &b.ctx).size() == 2);
+}
+
+static void testIsLoopback() {
+	auto bin = [](std::initializer_list<int> bytes) { std::string s; for (int b : bytes) s.push_back((char) b); return s; };
+	CHECK(Utils::isLoopback(bin({127, 0, 0, 1})));
+	CHECK(Utils::isLoopback(bin({127, 1, 2, 3})));
+	CHECK(!Utils::isLoopback(bin({10, 0, 0, 1})));
+	CHECK(!Utils::isLoopback(bin({172, 64, 0, 1})));
+	CHECK(Utils::isLoopback(bin({0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})));
+	CHECK(Utils::isLoopback(bin({0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 127, 0, 0, 1})));
+	CHECK(!Utils::isLoopback(bin({0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 8, 8, 8, 8})));
+	CHECK(!Utils::isLoopback(bin({0x26, 0x06, 0x47, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})));
+	CHECK(!Utils::isLoopback(""));
+}
+
 #define RUN(t) do { if (std::getenv("OWT_TEST_VERBOSE")) std::cerr << #t << std::endl; t(); } while (0)
 
 int main() {
@@ -929,6 +1040,10 @@ int main() {
 	RUN(testAnnounceIntervalJitter);
 	RUN(testFailureReasons);
 	RUN(testFailureReasonMetrics);
+	RUN(testFailureSampleSummary);
+	RUN(testFailureSampleStore);
+	RUN(testFailureDiagnosis);
+	RUN(testIsLoopback);
 
 	if (failures) {
 		std::cerr << failures << " check(s) failed" << std::endl;

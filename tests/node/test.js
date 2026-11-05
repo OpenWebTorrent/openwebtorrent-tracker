@@ -170,6 +170,30 @@ test('protocol errors are counted per reason in the metrics', async () => {
   s.close()
 })
 
+test('rejected requests are sampled on /debug/failures.json without SDP', async () => {
+  const ua = 'owt-integration-test/1.0'
+  const s = await connect(URL, { 'User-Agent': ua, Origin: 'https://example.test' })
+  await wait(150) // one sample per reason per 100 ms
+  const sdp = 'v=0 c=IN IP4 203.0.113.7 a=candidate:1 1 udp 1 198.51.100.4 5000 typ host'
+  s.json({ action: 'announce', event: 'started', info_hash: 'ab'.repeat(20), peer_id: id('h'), numwant: 1, offers: [{ offer_id: 'o', offer: { type: 'offer', sdp } }] })
+  await s.next((m) => m['failure reason'] === 'info_hash field is missing or wrong')
+
+  const res = await fetch(`http://127.0.0.1:${PORT}/debug/failures.json`)
+  assert.strictEqual(res.status, 200)
+  const body = await res.text()
+  assert.ok(!body.includes('203.0.113.7') && !body.includes('198.51.100.4'), 'no SDP in samples')
+  const sample = JSON.parse(body).announce_info_hash.find((x) => x.client.includes(ua))
+  assert.ok(sample, 'sample for this client')
+  assert.strictEqual(sample.client, `https://example.test | ${ua}`)
+  assert.strictEqual(sample.request.info_hash.bytes, 40)
+  assert.strictEqual(sample.request.info_hash.hex, true)
+  assert.strictEqual(sample.request.peer_id.preview, id('h'))
+  assert.strictEqual(sample.request.offers.size, 1)
+  assert.strictEqual(sample.tracker.connectionTorrents, 0)
+  assert.ok(sample.connectionAgeSeconds >= 0)
+  s.close()
+})
+
 test('full scrape is disabled by default', async () => {
   const s = await connect()
   s.json({ action: 'scrape' })

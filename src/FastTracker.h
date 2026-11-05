@@ -91,6 +91,46 @@ public:
 		}
 	}
 
+	json diagnose(const json& data, const PeerContext* connection) const override {
+		json out = {
+			{"connectionTorrents", connection->membershipCount},
+			{"connectionPeerIds", connection->memberships.size()}
+		};
+		if (!data.is_object()) {
+			return out;
+		}
+		auto stringField = [&](const char* key) -> const std::string* {
+			auto it = data.find(key);
+			return it != data.end() && it->is_string() ? &it->get_ref<const std::string&>() : nullptr;
+		};
+		// Which connection a peer ID is registered to, relative to this one
+		auto owner = [&](const PeerContext* c) { return c == connection ? "this" : "other"; };
+		const std::string* peerId = stringField("peer_id");
+		const std::string* toPeerId = stringField("to_peer_id");
+		const std::string* infoHash = stringField("info_hash");
+		if (peerId != nullptr) {
+			auto it = this->peers.find(*peerId);
+			out["peerIdConnection"] = it == this->peers.end() ? "none" : owner(it->second);
+			out["peerIdOnThisConnection"] = connection->memberships.count(*peerId) > 0;
+		}
+		if (infoHash != nullptr) {
+			auto swarmIt = this->swarms.find(*infoHash);
+			out["swarmExists"] = swarmIt != this->swarms.end();
+			if (swarmIt != this->swarms.end()) {
+				const Swarm& swarm = *swarmIt->second;
+				out["swarmPeers"] = swarm.getPeersCount();
+				if (peerId != nullptr) {
+					const Swarm::Member* member = swarm.findPeer(*peerId);
+					out["peerInSwarm"] = member == nullptr ? "no" : owner(member->connection);
+				}
+				if (toPeerId != nullptr) {
+					out["toPeerInSwarm"] = swarm.findPeer(*toPeerId) != nullptr;
+				}
+			}
+		}
+		return out;
+	}
+
 	// Called when the connection closes: removes every peer ID it carries
 	void disconnectPeer(PeerContext* peer) override {
 		std::vector<std::string> peerIds;

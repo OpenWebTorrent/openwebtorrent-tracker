@@ -82,6 +82,20 @@ namespace Logger {
 		return "";
 	}
 
+	// 127.0.0.0/8, ::1 or ::ffff:127.0.0.0/104 (binary address from uWS)
+	inline bool isLoopback(std::string_view binary) {
+		const unsigned char* b = (const unsigned char*) binary.data();
+		if (binary.size() == 4) {
+			return b[0] == 127;
+		}
+		if (binary.size() == 16) {
+			static const unsigned char v4Mapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+			static const unsigned char v6Loopback[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+			return std::equal(b, b + 16, v6Loopback) || (std::equal(b, b + 12, v4Mapped) && b[12] == 127);
+		}
+		return false;
+	}
+
 	// Same as above for a textual address (e.g. from X-Forwarded-For)
 	inline std::string addressKeyFromText(std::string_view address) {
 		std::string text(address);

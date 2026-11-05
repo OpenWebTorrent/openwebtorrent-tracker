@@ -112,6 +112,12 @@ struct PeerContext {
 	std::string address;
 	Utils::TokenBucket rateLimiter;
 
+	// For debugging rejected requests: "Origin | User-Agent" (interned by the
+	// server, shared between connections) and when the connection opened.
+	// Only the thread owning the socket reads them.
+	const std::string* client = nullptr;
+	Clock::time_point openedAt{};
+
 	bool hasMembership(const std::string& peerId, const std::string& infoHash) const {
 		auto it = this->memberships.find(peerId);
 		return it != this->memberships.end() && it->second.count(infoHash) > 0;

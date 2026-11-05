@@ -74,6 +74,7 @@ tracker is directly reachable, since clients could then forge their address.
 | `/status` | Status page: health checks, current values and charts (connections, peers, messages, CPU per thread, lock contention, churn, rejected traffic, bandwidth, memory), and protocol errors by reason |
 | `/stats.json` | Torrent, peer and connection counts, computed live (original format) |
 | `/stats/metrics.json` | Current metrics, refreshed every 5 seconds. `failureReasons` lists each protocol error (`reason`, the `message` sent to clients, `total` since start, and `windowCount` / `windowRate` over the last 15 minutes) |
+| `/debug/failures.json` | Last 20 rejected requests per failure reason, summarized (field types, lengths, short previews; never SDP), with the connection's Origin/User-Agent and tracker state. Loopback only (404 otherwise) |
 | `/stats/history.json?range=15m\|1h\|6h\|24h\|7d` | Metric history for charts. Kept in memory: 5-second samples for 1 hour, 1-minute samples for 7 days |
 
 ### Threads

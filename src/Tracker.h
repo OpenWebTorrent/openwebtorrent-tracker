@@ -67,6 +67,10 @@ public:
 	// stalling every thread for one long scan.
 	virtual void cleanupStalePeersStep(unsigned int slices) { this->cleanupStalePeers(); }
 
+	// Tracker state relevant to a rejected request, for debugging. Called
+	// under the server lock, only for sampled failures.
+	virtual json diagnose(const json& data, const PeerContext* peer) const { return json::object(); }
+
 };
 
 };

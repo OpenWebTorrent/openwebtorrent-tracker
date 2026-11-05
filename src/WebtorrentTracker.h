@@ -13,6 +13,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <json.hpp>
@@ -28,6 +29,7 @@
 #include "PeerContext.h"
 #include "StatusPage.h"
 #include "TrackerException.h"
+#include "FailureSamples.h"
 
 using namespace nlohmann;
 
@@ -83,12 +85,15 @@ private:
 
 	std::atomic<uint64_t> nextConnectionId{1};
 	Metrics metrics;
+	FailureSamples failureSamples;
 
 	static constexpr unsigned int CLEANUP_SLICES = 64;
 
 	// Per worker thread
 	static inline thread_local std::unordered_map<uint64_t, void*> localSockets;
 	static inline thread_local WorkerCounters* localCounters = nullptr;
+	// Distinct "Origin | User-Agent" strings seen by this thread (see internClient)
+	static inline thread_local std::unordered_set<std::string> localClients;
 
 public:
 
@@ -344,6 +349,22 @@ private:
 			res->end(body);
 		});
 
+		// Recent rejected requests per reason, summarized (no SDP). Loopback
+		// only: clients reach the tracker through Cloudflare, never from
+		// 127.0.0.1, so this isn't reachable from outside.
+		//   curl -s http://127.0.0.1/debug/failures.json
+		app.get("/debug/failures.json", [this](auto* res, auto* req) {
+			if (!Utils::isLoopback(res->getRemoteAddress())) {
+				res->writeStatus("404 Not Found");
+				res->end("404 Not Found");
+				return;
+			}
+			std::string body = this->failureSamples.dump();
+			res->writeHeader("Content-Type", "application/json");
+			res->writeHeader("Cache-Control", "no-store");
+			res->end(body);
+		});
+
 		app.get("/status", [](auto* res, auto* req) {
 			res->writeHeader("Content-Type", "text/html; charset=utf-8");
 			res->writeHeader("Cache-Control", "no-cache");
@@ -449,6 +470,8 @@ private:
 			}
 		}
 
+		peer.client = internClient(req->getHeader("origin"), req->getHeader("user-agent"));
+
 		res->template upgrade<PeerContext>(
 			std::move(peer),
 			req->getHeader("sec-websocket-key"),
@@ -468,6 +491,7 @@ private:
 		peer->id = this->nextConnectionId.fetch_add(1, std::memory_order_relaxed);
 		peer->owner = uWS::Loop::get();
 		peer->rateLimiter = Utils::TokenBucket(this->options.messageRate, this->options.messageBurst);
+		peer->openedAt = PeerContext::Clock::now();
 		localSockets[peer->id] = ws;
 
 		localCounters->websockets.fetch_add(1, std::memory_order_relaxed);
@@ -522,7 +546,13 @@ private:
 		// `data` must outlive delivery: queued offers/answers point into it
 		// (PeerContext::Outgoing). runLocked delivers before returning.
 		const uint64_t id = peer->id;
+		// Read now: delivery below can close the socket and free `peer`
+		const std::string* client = peer->client;
+		const PeerContext::Clock::time_point openedAt = peer->openedAt;
 		bool closeConnection = false;
+		bool sampled = false;
+		FailureReason failure{};
+		json diagnosis;
 		this->runLocked<SSL>([&](Tracker& tracker) {
 			try {
 				tracker.processMessage(data, peer);
@@ -532,11 +562,28 @@ private:
 				WorkerCounters::add(localCounters->failures);
 				WorkerCounters::add(localCounters->failureReasons[static_cast<size_t>(e.reason())]);
 				peer->sendMessage(this->failureMessage(data, e.what()));
+				if (this->failureSamples.shouldSample(e.reason())) {
+					sampled = true;
+					failure = e.reason();
+					diagnosis = tracker.diagnose(data, peer);
+				}
 			} catch (const std::exception& e) {
 				EOUT("Error: " << e.what());
 				closeConnection = true;
 			}
 		});
+
+		// Summarized outside the lock
+		if (sampled) {
+			using namespace std::chrono;
+			this->failureSamples.record(failure, {
+				{"time", Metrics::nowMs()},
+				{"client", client != nullptr ? *client : std::string()},
+				{"connectionAgeSeconds", duration_cast<seconds>(PeerContext::Clock::now() - openedAt).count()},
+				{"tracker", std::move(diagnosis)},
+				{"request", FailureSamples::summarize(data)}
+			});
+		}
 
 		// Delivery can close this very socket (backpressure limit): check it still exists
 		if (closeConnection && localSockets.count(id) > 0) {
@@ -595,6 +642,25 @@ private:
 			}
 		}
 		return Utils::addressKey(res->getRemoteAddress());
+	}
+
+	// Interned "Origin | User-Agent" of a connection. Each value is stored once
+	// per thread and shared by its connections; past MAX_CLIENTS distinct
+	// values (forged headers), new ones aren't recorded.
+	static constexpr size_t MAX_CLIENTS = 4096;
+	static constexpr size_t MAX_HEADER = 160;
+
+	static const std::string* internClient(std::string_view origin, std::string_view userAgent) {
+		static const std::string tooMany = "(not recorded: too many distinct clients)";
+		std::string key = std::string(origin.substr(0, MAX_HEADER)) + " | " + std::string(userAgent.substr(0, MAX_HEADER));
+		auto it = localClients.find(key);
+		if (it != localClients.end()) {
+			return &*it;
+		}
+		if (localClients.size() >= MAX_CLIENTS) {
+			return &tooMany;
+		}
+		return &*localClients.insert(std::move(key)).first;
 	}
 
 	static json failureMessage(const json& data, const std::string& reason) {
