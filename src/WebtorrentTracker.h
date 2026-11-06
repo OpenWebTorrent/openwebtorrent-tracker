@@ -337,6 +337,7 @@ private:
 			std::shared_ptr<const std::string> current = this->metrics.current();
 			res->writeHeader("Content-Type", "application/json");
 			res->writeHeader("Cache-Control", "no-store");
+			res->writeHeader("X-Robots-Tag", "noindex, nofollow");
 			res->writeHeader("Access-Control-Allow-Origin", "*");
 			res->end(*current);
 		});
@@ -345,6 +346,7 @@ private:
 			std::string body = this->metrics.history(req->getQuery("range"));
 			res->writeHeader("Content-Type", "application/json");
 			res->writeHeader("Cache-Control", "no-store");
+			res->writeHeader("X-Robots-Tag", "noindex, nofollow");
 			res->writeHeader("Access-Control-Allow-Origin", "*");
 			res->end(body);
 		});
@@ -362,12 +364,14 @@ private:
 			std::string body = this->failureSamples.dump();
 			res->writeHeader("Content-Type", "application/json");
 			res->writeHeader("Cache-Control", "no-store");
+			res->writeHeader("X-Robots-Tag", "noindex, nofollow");
 			res->end(body);
 		});
 
 		app.get("/status", [](auto* res, auto* req) {
 			res->writeHeader("Content-Type", "text/html; charset=utf-8");
 			res->writeHeader("Cache-Control", "no-cache");
+			res->writeHeader("X-Robots-Tag", "noindex, nofollow");
 			res->end(STATUS_PAGE_HTML);
 		});
 

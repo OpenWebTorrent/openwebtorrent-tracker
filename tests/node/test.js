@@ -223,6 +223,17 @@ test('answer on a new connection reaches the offerer', async () => {
   offerer.close(); newConn.close(); thief.close()
 })
 
+test('status page and its data are marked noindex', async () => {
+  const page = await fetch(`http://127.0.0.1:${PORT}/status`)
+  assert.strictEqual(page.headers.get('x-robots-tag'), 'noindex, nofollow')
+  assert.match(await page.text(), /<meta name="robots" content="noindex, nofollow">/)
+  for (const path of ['/stats/metrics.json', '/stats/history.json?range=1h', '/debug/failures.json']) {
+    const res = await fetch(`http://127.0.0.1:${PORT}${path}`)
+    assert.strictEqual(res.status, 200, path)
+    assert.strictEqual(res.headers.get('x-robots-tag'), 'noindex, nofollow', path)
+  }
+})
+
 test('full scrape is disabled by default', async () => {
   const s = await connect()
   s.json({ action: 'scrape' })

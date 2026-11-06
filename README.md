@@ -77,6 +77,11 @@ tracker is directly reachable, since clients could then forge their address.
 | `/debug/failures.json` | Last 20 rejected requests per failure reason, summarized. Loopback only (404 otherwise). See [Debugging protocol errors](#debugging-protocol-errors) |
 | `/stats/history.json?range=15m\|1h\|6h\|24h\|7d` | Metric history for charts. Kept in memory: 5-second samples for 1 hour, 1-minute samples for 7 days |
 
+The status page and the `/stats/metrics.json`, `/stats/history.json` and
+`/debug/failures.json` endpoints are marked `noindex, nofollow` (an
+`X-Robots-Tag` header, plus a `<meta name="robots">` tag on the page) so
+search engines don't index them. `/stats.json` keeps its original headers.
+
 ### Threads
 
 One thread accepts connections and hands them round robin to the worker
