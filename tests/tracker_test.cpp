@@ -454,9 +454,12 @@ static void testMultiplePeerIdsPerConnection() {
 	tracker.processMessage(answerMessage(IH1, peerId('x'), peerId('b'), "s1"), &shared.ctx);
 	CHECK(answersWithSdp(b, "s1") == 1);
 
-	// A peer ID live on another connection can't answer from here
-	CHECK(throwsTrackerException(tracker, answerMessage(IH1, peerId('x'), peerId('b'), "s2"), &c.ctx));
-	CHECK(answersWithSdp(b, "s2") == 0);
+	// An answer with a peer ID owned by another connection is relayed, but the
+	// peer ID stays where it is (see testAnswerIsAnAnnounce)
+	CHECK(!throwsTrackerException(tracker, answerMessage(IH1, peerId('x'), peerId('b'), "s2c"), &c.ctx));
+	CHECK(answersWithSdp(b, "s2c") == 1);
+	CHECK(c.ctx.membershipCount == 0);
+	CHECK(shared.ctx.hasMembership(peerId('x'), IH1));
 	// A peer ID of this connection that isn't in that swarm joins it by
 	// answering, like an announce (see testAnswerIsAnAnnounce)
 	CHECK(!throwsTrackerException(tracker, answerMessage(IH1, peerId('y'), peerId('b'), "s2"), &shared.ctx));
@@ -812,7 +815,6 @@ static void testFailureReasons() {
 		{answerBadToPeer, "answer_to_peer_id", "to_peer_id field is missing or wrong"},
 		{badAnswer, "bad_answer", "answer: answer field is missing or wrong"},
 		{noOfferId, "bad_offer_id", "answer: offer_id field is missing or wrong"},
-		{answerMessage(IH1, peerId('o'), peerId('p'), "s"), "answer_peer_id_taken", "answer: peer_id belongs to another connection"},
 		{{{"action", "announce"}, {"event", "stopped"}}, "stop_info_hash", "info_hash field is missing or wrong"},
 		{stopBadPeer, "stop_peer_id", "peer_id field is missing or wrong"},
 		{{{"action", "scrape"}}, "full_scrape_disabled", "scrape: full scrape is disabled"},
@@ -857,7 +859,7 @@ static void testFailureReasons() {
 static void testFailureReasonMetrics() {
 	Metrics metrics;
 	metrics.init(1);
-	const size_t answerNotInSwarm = static_cast<size_t>(FailureReason::AnswerPeerIdTaken);
+	const size_t answerNotInSwarm = static_cast<size_t>(FailureReason::UnknownAction);
 	const size_t badOffer = static_cast<size_t>(FailureReason::BadOffer);
 
 	auto sample = [&](int64_t timeMs, uint64_t notInSwarm, uint64_t offers) {
@@ -879,9 +881,9 @@ static void testFailureReasonMetrics() {
 	sample(1000000, 100, 0);
 	json current = json::parse(*metrics.current());
 	CHECK(current["failureReasons"].size() == FAILURE_REASON_COUNT);
-	CHECK(reasonOf(current, "answer_peer_id_taken")["total"] == 100);
-	CHECK(reasonOf(current, "answer_peer_id_taken")["windowCount"] == 0);
-	CHECK(reasonOf(current, "answer_peer_id_taken")["rate"] == 0.0);
+	CHECK(reasonOf(current, "unknown_action")["total"] == 100);
+	CHECK(reasonOf(current, "unknown_action")["windowCount"] == 0);
+	CHECK(reasonOf(current, "unknown_action")["rate"] == 0.0);
 
 	// 5 s samples for 20 minutes: 2 failures per sample, one bad offer per minute
 	int64_t t = 1000000;
@@ -893,8 +895,8 @@ static void testFailureReasonMetrics() {
 		sample(t, n, offers);
 	}
 	current = json::parse(*metrics.current());
-	json r = reasonOf(current, "answer_peer_id_taken");
-	CHECK(r["message"] == "answer: peer_id belongs to another connection");
+	json r = reasonOf(current, "unknown_action");
+	CHECK(r["message"] == "unknown action");
 	CHECK(r["total"] == n);
 	CHECK(r["rate"] == 0.4);              // 2 per 5 s
 	CHECK(r["windowCount"] == 360);       // 15 min window = 180 samples
@@ -903,7 +905,7 @@ static void testFailureReasonMetrics() {
 	json o = reasonOf(current, "bad_offer");
 	CHECK(o["total"] == 20);
 	CHECK(o["windowCount"] == 15);
-	CHECK(reasonOf(current, "unknown_action")["total"] == 0);
+	CHECK(reasonOf(current, "not_object")["total"] == 0);
 	// Sum of reasons matches the total counter
 	uint64_t sum = 0;
 	for (const auto& x : current["failureReasons"]) sum += x["total"].get<uint64_t>();
@@ -1042,11 +1044,27 @@ static void testAnswerIsAnAnnounce() {
 	// No announce reply for an answer (bittorrent-tracker doesn't send one either)
 	CHECK(newConn.inbox.empty());
 
-	// Stricter than bittorrent-tracker: no taking over a live peer ID
-	FakePeer thief;
-	CHECK(failureOf(tracker, answerMessage(IH1, peerId('q'), peerId('w'), "x"), &thief.ctx) == "answer_peer_id_taken");
-	CHECK(answersWithSdp(offerer, "x") == 0);
-	CHECK(thief.ctx.membershipCount == 0);
+	// A peer ID owned by another connection (qBittorrent with an old or a
+	// parallel connection still open): the answer is relayed, like in
+	// bittorrent-tracker, but the peer ID doesn't move
+	FakePeer other;
+	CHECK(failureOf(tracker, answerMessage(IH1, peerId('q'), peerId('w'), "x"), &other.ctx) == "none");
+	CHECK(answersWithSdp(offerer, "x") == 1);
+	CHECK(other.ctx.membershipCount == 0);
+	CHECK(newConn.ctx.hasMembership(peerId('q'), IH1));
+	CHECK(tracker.diagnose(answerMessage(IH1, peerId('q'), peerId('w'), "x"), &newConn.ctx)["peerIdConnection"] == "this");
+
+	// An app answering with a shared placeholder peer ID: every instance's
+	// answers are relayed, the placeholder joins only the first one's swarm
+	const std::string placeholder = "01234567890123456789";
+	FakePeer app1, app2;
+	tracker.processMessage(answerMessage(IH1, placeholder, peerId('w'), "app1"), &app1.ctx);
+	tracker.processMessage(answerMessage(IH1, placeholder, peerId('w'), "app2"), &app2.ctx);
+	CHECK(answersWithSdp(offerer, "app1") == 1);
+	CHECK(answersWithSdp(offerer, "app2") == 1);
+	CHECK(app1.ctx.membershipCount == 1);
+	CHECK(app2.ctx.membershipCount == 0);
+	tracker.disconnectPeer(&app1.ctx);
 
 	// No swarm: dropped, nothing created
 	FakePeer stray;

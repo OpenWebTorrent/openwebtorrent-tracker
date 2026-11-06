@@ -28,7 +28,6 @@ namespace owt {
 	X(AnswerToPeerId,        "answer_to_peer_id",       "to_peer_id field is missing or wrong") \
 	X(BadAnswer,             "bad_answer",              "answer: answer field is missing or wrong") \
 	X(BadOfferId,            "bad_offer_id",            "answer: offer_id field is missing or wrong") \
-	X(AnswerPeerIdTaken,     "answer_peer_id_taken",    "answer: peer_id belongs to another connection") \
 	X(StopInfoHash,          "stop_info_hash",          "info_hash field is missing or wrong") \
 	X(StopPeerId,            "stop_peer_id",            "peer_id field is missing or wrong") \
 	X(FullScrapeDisabled,    "full_scrape_disabled",    "scrape: full scrape is disabled") \

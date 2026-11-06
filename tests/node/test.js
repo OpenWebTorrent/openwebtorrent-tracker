@@ -213,14 +213,13 @@ test('answer on a new connection reaches the offerer', async () => {
   assert.strictEqual(answer.peer_id, id('Q'))
   assert.ok(!newConn.messages.some((m) => m['failure reason']))
 
-  // A peer ID live on another connection can't be used to answer
-  const thief = await connect()
-  thief.json({ action: 'announce', info_hash: ih, peer_id: id('Q'), to_peer_id: offer.peer_id, offer_id: offer.offer_id, answer: { type: 'answer', sdp: 'stolen' } })
-  const failure = await thief.next((m) => m['failure reason'])
-  assert.strictEqual(failure['failure reason'], 'answer: peer_id belongs to another connection')
-  await wait(100)
-  assert.ok(!offerer.messages.some((m) => m.answer && m.answer.sdp === 'stolen'))
-  offerer.close(); newConn.close(); thief.close()
+  // A peer ID owned by another connection: relayed too (like bittorrent-tracker),
+  // without moving the peer ID
+  const parallel = await connect()
+  parallel.json({ action: 'announce', info_hash: ih, peer_id: id('Q'), to_peer_id: offer.peer_id, offer_id: offer.offer_id, answer: { type: 'answer', sdp: 'parallel' } })
+  assert.strictEqual((await offerer.next((m) => m.answer && m.answer.sdp === 'parallel')).peer_id, id('Q'))
+  assert.ok(!parallel.messages.some((m) => m['failure reason']))
+  offerer.close(); newConn.close(); parallel.close()
 })
 
 test('status page and its data are marked noindex', async () => {

@@ -129,10 +129,18 @@ These don't change anything for a client that follows the protocol:
   notes"). bittorrent-tracker accepts them too, but when the connection
   closes it only removes the first peer ID it saw; the others linger until
   they expire.
-- **An answer can't take over a peer ID that another live connection is
-  using** (`answer_peer_id_taken`). bittorrent-tracker doesn't check. An
-  announce can still move a peer ID to a new connection, by design, so
-  reconnecting clients keep their identity.
+- **An answer never moves a peer ID to another connection.** If an answer's
+  `peer_id` belongs to another live connection, the answer is relayed but
+  nothing is registered: the peer stays on its connection. bittorrent-tracker
+  also relays it and keeps the peer's original socket when the peer is in the
+  swarm; when it isn't, bittorrent-tracker adds it on the answering socket,
+  which we don't. Only an announce moves a peer ID, so reconnecting clients
+  keep their identity. Relaying such an answer is harmless: the recipient
+  only accepts an answer to an `offer_id` it sent to that peer. Clients that
+  need this (seen 2026-11-06, ~1.5/s): qBittorrent answering on a new
+  connection while its old one is still open, and an app (no Origin or
+  User-Agent) that answers with the placeholder peer ID
+  `01234567890123456789` from every instance.
 - **Server limits**: messages per second, torrents per connection, info
   hashes per scrape, and no full scrape by default (see "Limits").
 
@@ -185,14 +193,15 @@ stays open) and is counted under one reason in `/stats/metrics.json`
 | `answer_to_peer_id` | to_peer_id field is missing or wrong |
 | `bad_answer` | answer: answer field is missing or wrong |
 | `bad_offer_id` | answer: offer_id field is missing or wrong |
-| `answer_peer_id_taken` | answer: peer_id belongs to another connection |
 | `stop_info_hash` | info_hash field is missing or wrong |
 | `stop_peer_id` | peer_id field is missing or wrong |
 | `full_scrape_disabled` | scrape: full scrape is disabled |
 | `too_many_scrape_hashes` | scrape: too many info_hash values |
 | `bad_scrape_info_hash` | scrape: info_hash field is wrong |
 
-Removed: `answer_not_in_swarm` (answers now count as announces, see above).
+Removed: `answer_not_in_swarm` (answers now count as announces, see above)
+and `answer_peer_id_taken` (answers with another connection's peer ID are
+relayed, see "Where this tracker differs").
 
 ## Debugging protocol errors
 

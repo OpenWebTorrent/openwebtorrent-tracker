@@ -327,18 +327,20 @@ private:
 		}
 
 		auto swarmIt = this->swarms.find(infoHash);
-		if (!connection->hasMembership(peerId, infoHash)) {
-			// A peer ID that is live on another connection can't be used here
-			// (stricter than bittorrent-tracker)
-			auto owner = this->peers.find(peerId);
-			if (owner != this->peers.end() && owner->second != connection) {
-				throw TrackerException(FailureReason::AnswerPeerIdTaken);
-			}
+		auto owner = this->peers.find(peerId);
+		bool ownedElsewhere = owner != this->peers.end() && owner->second != connection;
+		if (!connection->hasMembership(peerId, infoHash) && !ownedElsewhere) {
 			// bittorrent-tracker handles an answer as an announce ("update"),
 			// which adds a sender that isn't in the swarm yet. libtorrent
 			// (qBittorrent) relies on it: it answers an offer on a new
 			// connection before announcing there. If there's no swarm, nobody
 			// can receive the answer: dropped below without creating one.
+			//
+			// A peer ID owned by another connection is never moved by an
+			// answer (only an announce moves it): the answer is just relayed.
+			// bittorrent-tracker relays it too and keeps the peer's original
+			// socket. Relaying is harmless: the recipient only accepts an
+			// answer to an offer_id it sent to that peer.
 			if (swarmIt != this->swarms.end()) {
 				size_t maxMemberships = this->options.maxSwarmsPerPeer;
 				if (maxMemberships > 0 && connection->membershipCount >= maxMemberships) {
