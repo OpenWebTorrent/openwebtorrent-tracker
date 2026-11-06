@@ -233,14 +233,21 @@ async function main() {
       m.offer_id?.startsWith('offer-distribution-')), false,
       'the sender must not receive its own offers');
 
-    // Peer IDs and info hashes must be 20-byte strings, like bittorrent-tracker.
-    // Invalid announces get a failure reason without closing the connection.
+    // Outside the protocol: identifiers that aren't 20-byte strings are accepted
+    // as opaque keys up to 64 bytes (README: "Deviations from the WebTorrent protocol").
     const shortHash = 'short-hash';
     const shortPeer = 'short-peer';
     send(e, { action: 'announce', event: 'started', info_hash: shortHash, peer_id: shortPeer, left: 1 });
     await waitFor(
-      () => e.messages.some(m => m['failure reason'] && m.info_hash === shortHash),
-      'failure reason for short identifiers'
+      () => e.messages.some(m => m.action === 'announce' && m.info_hash === shortHash && typeof m.interval === 'number'),
+      'announce reply for short identifiers'
+    );
+    // Longer than 64 bytes: a failure reason, and the connection stays open.
+    const longHash = 'x'.repeat(65);
+    send(e, { action: 'announce', event: 'started', info_hash: longHash, peer_id: shortPeer, left: 1 });
+    await waitFor(
+      () => e.messages.some(m => m['failure reason'] && m.info_hash === longHash),
+      'failure reason for a 65-byte info_hash'
     );
     assert.equal(e.ws.readyState, WebSocket.OPEN, 'invalid identifiers must not close the connection');
     await new Promise((resolve, reject) => {

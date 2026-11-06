@@ -10,11 +10,11 @@ namespace owt {
 // reason in the metrics; the message is the "failure reason" sent to the client.
 // Some messages are shared by several codes so the metrics can tell apart where
 // the error happened (e.g. a bad info_hash in an announce vs. an answer).
+// Codes are never reused: a removed reason's key disappears from the metrics.
 #define OWT_FAILURE_REASONS(X) \
 	X(NotObject,             "not_object",              "message must be a JSON object") \
 	X(ActionNotString,       "action_not_string",       "action field must be a string") \
 	X(EventNotString,        "event_not_string",        "event field must be a string") \
-	X(UnknownEvent,          "unknown_event",           "unknown announce event") \
 	X(UnknownAction,         "unknown_action",          "unknown action") \
 	X(AnnounceInfoHash,      "announce_info_hash",      "info_hash field is missing or wrong") \
 	X(AnnouncePeerId,        "announce_peer_id",        "peer_id field is missing or wrong") \
@@ -27,7 +27,7 @@ namespace owt {
 	X(AnswerToPeerId,        "answer_to_peer_id",       "to_peer_id field is missing or wrong") \
 	X(BadAnswer,             "bad_answer",              "answer: answer field is missing or wrong") \
 	X(BadOfferId,            "bad_offer_id",            "answer: offer_id field is missing or wrong") \
-	X(AnswerNotInSwarm,      "answer_not_in_swarm",     "answer: peer_id is not in the swarm on this connection") \
+	X(AnswerPeerIdTaken,     "answer_peer_id_taken",    "answer: peer_id belongs to another connection") \
 	X(StopInfoHash,          "stop_info_hash",          "info_hash field is missing or wrong") \
 	X(StopPeerId,            "stop_peer_id",            "peer_id field is missing or wrong") \
 	X(FullScrapeDisabled,    "full_scrape_disabled",    "scrape: full scrape is disabled") \

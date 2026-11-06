@@ -395,10 +395,9 @@ async function main() {
       }
     }
 
-    // Paused is now supported; unrelated unknown events must remain rejected.
+    // Outside the protocol: unknown events (e.g. Gopeed's "<regular>") are
+    // handled as a regular update (README: "Deviations from the WebTorrent protocol").
     await waitForOpen(invalid);
-    // 'update' is a valid bittorrent-tracker event; use a genuinely unknown one.
-    // Errors are reported with a failure reason and keep the connection open.
     send(invalid, {
       action: 'announce',
       event: 'unknown-event',
@@ -407,13 +406,14 @@ async function main() {
       left: 1,
     });
     await waitFor(
-      () => invalid.messages.some(message => message['failure reason'] === 'unknown announce event' &&
-        message.info_hash === infoHash),
-      'failure reason for unknown event'
+      () => invalid.messages.some(message => message.action === 'announce' && message.info_hash === infoHash &&
+        typeof message.interval === 'number'),
+      'announce reply for an unknown event'
     );
+    assert.equal(invalid.messages.some(message => message['failure reason']), false, 'an unknown event must not fail');
     assert.equal(invalid.ws.readyState, WebSocket.OPEN, 'an unknown event must not close the connection');
 
-    console.log('PASS: paused lifecycle, BEP 21 scrape paths, multi-swarm accounting, stale expiry, cleanup, offer/answer routing, and unknown-event rejection');
+    console.log('PASS: paused lifecycle, BEP 21 scrape paths, multi-swarm accounting, stale expiry, cleanup, offer/answer routing, and unknown events as updates');
   } finally {
     for (const client of [seed, partial, observer, invalid]) {
       if (client.ws.readyState === WebSocket.OPEN || client.ws.readyState === WebSocket.CONNECTING) {

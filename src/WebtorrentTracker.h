@@ -621,6 +621,7 @@ private:
 			sample.memberships = this->tracker->getMembershipCount();
 			sample.seeders = this->tracker->getSeederCount();
 			sample.leechers = sample.memberships - sample.seeders;
+			sample.compat = this->tracker->getCompatCounters();
 		}
 		this->metrics.collect(sample);
 		this->metrics.record(std::move(sample));

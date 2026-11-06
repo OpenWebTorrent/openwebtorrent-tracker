@@ -175,7 +175,7 @@ test('rejected requests are sampled on /debug/failures.json without SDP', async 
   const s = await connect(URL, { 'User-Agent': ua, Origin: 'https://example.test' })
   await wait(150) // one sample per reason per 100 ms
   const sdp = 'v=0 c=IN IP4 203.0.113.7 a=candidate:1 1 udp 1 198.51.100.4 5000 typ host'
-  s.json({ action: 'announce', event: 'started', info_hash: 'ab'.repeat(20), peer_id: id('h'), numwant: 1, offers: [{ offer_id: 'o', offer: { type: 'offer', sdp } }] })
+  s.json({ action: 'announce', event: 'started', info_hash: 'ab'.repeat(32) + 'c', peer_id: id('h'), numwant: 1, offers: [{ offer_id: 'o', offer: { type: 'offer', sdp } }] })
   await s.next((m) => m['failure reason'] === 'info_hash field is missing or wrong')
 
   const res = await fetch(`http://127.0.0.1:${PORT}/debug/failures.json`)
@@ -185,13 +185,62 @@ test('rejected requests are sampled on /debug/failures.json without SDP', async 
   const sample = JSON.parse(body).announce_info_hash.find((x) => x.client.includes(ua))
   assert.ok(sample, 'sample for this client')
   assert.strictEqual(sample.client, `https://example.test | ${ua}`)
-  assert.strictEqual(sample.request.info_hash.bytes, 40)
+  assert.strictEqual(sample.request.info_hash.bytes, 65) // over the 64-byte limit
   assert.strictEqual(sample.request.info_hash.hex, true)
   assert.strictEqual(sample.request.peer_id.preview, id('h'))
   assert.strictEqual(sample.request.offers.size, 1)
   assert.strictEqual(sample.tracker.connectionTorrents, 0)
   assert.ok(sample.connectionAgeSeconds >= 0)
   s.close()
+})
+
+// Deviations from the WebTorrent protocol (README: "Deviations from the WebTorrent protocol")
+test('outside the protocol: answer on a new connection reaches the offerer', async () => {
+  const ih = 'q'.repeat(20)
+  const offerer = await connect()
+  const oldConn = await connect()
+  oldConn.json({ action: 'announce', event: 'started', info_hash: ih, peer_id: id('Q'), numwant: 0, offers: [] })
+  await oldConn.next((m) => m.interval)
+  offerer.json({ action: 'announce', event: 'started', info_hash: ih, peer_id: id('W'), numwant: 1, offers: [{ offer_id: 'late-offer', offer: { type: 'offer', sdp: 'o' } }] })
+  const offer = await oldConn.next((m) => m.offer)
+  // libtorrent: the connection that got the offer goes away, the answer comes on a new one
+  oldConn.close()
+  await wait(100)
+  const newConn = await connect()
+  newConn.json({ action: 'announce', info_hash: ih, peer_id: id('Q'), to_peer_id: offer.peer_id, offer_id: offer.offer_id, answer: { type: 'answer', sdp: 'late-answer' } })
+  const answer = await offerer.next((m) => m.answer)
+  assert.strictEqual(answer.answer.sdp, 'late-answer')
+  assert.strictEqual(answer.peer_id, id('Q'))
+  assert.ok(!newConn.messages.some((m) => m['failure reason']))
+  offerer.close(); newConn.close()
+})
+
+test('outside the protocol: base64 info_hash and short peer_ids are opaque keys', async () => {
+  const room = 'JhMOjx9NZsExpIDm5Y1u6j2puX5Bij6PuNdzcTvaqOo='
+  const a = await connect()
+  const b = await connect()
+  a.json({ action: 'announce', event: 'started', info_hash: room, peer_id: 'rmi325ty2roqtkuk', numwant: 10, offers: [] })
+  assert.strictEqual((await a.next((m) => m.interval)).info_hash, room)
+  b.json({ action: 'announce', event: 'started', info_hash: room, peer_id: '7azuj1b8ja6wst6z', numwant: 1, offers: [{ offer_id: 'room-offer', offer: { type: 'offer', sdp: 'o' } }] })
+  const offer = await a.next((m) => m.offer)
+  assert.strictEqual(offer.info_hash, room)
+  assert.strictEqual(offer.peer_id, '7azuj1b8ja6wst6z')
+  a.json({ action: 'announce', info_hash: room, peer_id: 'rmi325ty2roqtkuk', to_peer_id: offer.peer_id, offer_id: offer.offer_id, answer: { type: 'answer', sdp: 'room-answer' } })
+  assert.strictEqual((await b.next((m) => m.answer)).answer.sdp, 'room-answer')
+
+  // The deviations are counted in the metrics (sampled every 5 s)
+  let metrics
+  for (let tries = 0; tries < 30; tries++) {
+    metrics = await (await fetch(`http://127.0.0.1:${PORT}/stats/metrics.json`)).json()
+    const ids = (metrics.nonStandard || []).find((x) => x.key === 'non_standard_ids')
+    if (ids && ids.total >= 3) break
+    await wait(500)
+  }
+  const byKey = Object.fromEntries(metrics.nonStandard.map((x) => [x.key, x]))
+  assert.ok(byKey.non_standard_ids.total >= 3)
+  assert.ok(byKey.answers_without_announce.total >= 1)
+  assert.ok('unknown_events' in byKey)
+  a.close(); b.close()
 })
 
 test('full scrape is disabled by default', async () => {

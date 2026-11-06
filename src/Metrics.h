@@ -16,6 +16,7 @@
 #include <vector>
 #include <json.hpp>
 #include "TrackerException.h"
+#include "Tracker.h"
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -75,6 +76,8 @@ struct MetricsSample {
 	uint64_t announces = 0, answers = 0, scrapes = 0, failures = 0, rateLimited = 0, invalid = 0;
 	uint64_t lockWaitNs = 0, lockHeldNs = 0;
 	std::array<uint64_t, FAILURE_REASON_COUNT> failureReasons{};
+	// Requests accepted outside the WebTorrent protocol (from the tracker)
+	CompatCounters compat;
 
 	// CPU time in clock ticks: whole process, and per thread (workers, then acceptor)
 	uint64_t processTicks = 0;
@@ -340,6 +343,23 @@ private:
 			});
 		}
 
+		// Requests accepted outside the WebTorrent protocol, same window
+		json nonStandard = json::array();
+		auto addNonStandard = [&](const char* key, const char* description, uint64_t CompatCounters::*field) {
+			uint64_t inWindow = b.compat.*field - std::min(b.compat.*field, windowStart->compat.*field);
+			nonStandard.push_back({
+				{"key", key},
+				{"description", description},
+				{"rate", rate(a.compat.*field, b.compat.*field)},
+				{"windowCount", inWindow},
+				{"windowRate", round1(inWindow / windowSeconds)},
+				{"total", b.compat.*field}
+			});
+		};
+		addNonStandard("non_standard_ids", "info_hash or peer_id that isn't a 20-byte binary string (hex, base64, other lengths)", &CompatCounters::nonStandardIds);
+		addNonStandard("unknown_events", "Announce with an unknown event, handled as an update", &CompatCounters::unknownEvents);
+		addNonStandard("answers_without_announce", "Answer from a peer that hadn't announced on its connection; added to the swarm", &CompatCounters::answersWithoutAnnounce);
+
 		return {
 			{"time", b.timeMs},
 			{"startTime", this->startTimeMs},
@@ -370,6 +390,7 @@ private:
 				{"invalid", rate(a.invalid, b.invalid)}
 			}},
 			{"failureReasons", failureReasons},
+			{"nonStandard", nonStandard},
 			{"failureWindowSeconds", (int64_t) std::round(windowSeconds)},
 			{"crossThreadPct", sent ? round1(100.0 * cross / sent) : 0.0},
 			{"lockWaitPct", round1((b.lockWaitNs - std::min(b.lockWaitNs, a.lockWaitNs)) / (seconds * 1e7))},

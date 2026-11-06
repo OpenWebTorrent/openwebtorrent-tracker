@@ -308,6 +308,13 @@ footer code { font-size: 12px; }
   const reasonsEl = el('div', { class: 'tablewrap' });
   reasonsCard.append(el('h2', {}, 'Protocol errors by reason'), reasonsDesc, reasonsEl);
   chartsEl.append(reasonsCard);
+  // Requests the tracker accepts outside the WebTorrent protocol
+  const compatCard = el('div', { class: 'card span2 reasons' });
+  const compatEl = el('div', { class: 'tablewrap' });
+  compatCard.append(el('h2', {}, 'Accepted outside the WebTorrent protocol'),
+    el('p', { class: 'desc' }, 'Requests that work only because this tracker is more lenient than the protocol, for clients that relied on the original tracker. See "Deviations from the WebTorrent protocol" in the README.'),
+    compatEl);
+  chartsEl.append(compatCard);
 
   // ---------- line chart with crosshair tooltip ----------
   function niceMax(v) {
@@ -547,6 +554,24 @@ footer code { font-size: 12px; }
     table.append(tb); reasonsEl.append(table);
   }
 
+  function renderNonStandard(cur) {
+    compatEl.replaceChildren();
+    const rows = (cur && cur.nonStandard) || [];
+    if (!rows.length) { compatEl.append(el('p', { class: 'note', style: 'margin: 8px 10px' }, 'No data yet.')); return; }
+    const ws = cur.failureWindowSeconds || 0;
+    const win = !ws ? 'window' : ws < 60 ? ws + ' s' : Math.round(ws / 60) + ' min';
+    const table = el('table'); const head = el('tr');
+    for (const h of ['Request', 'Last ' + win, 'Rate', 'Since start']) head.append(el('th', {}, h));
+    const thead = el('thead'); thead.append(head); table.append(thead);
+    const tb = el('tbody');
+    for (const r of rows) {
+      const tr = el('tr'); const what = el('td', {}, r.description); what.append(el('small', {}, r.key));
+      tr.append(what, el('td', {}, nf.format(r.windowCount)), el('td', {}, r.windowRate >= 0.1 ? perSec(r.windowRate) : (r.windowCount ? '< 0.1/s' : '–')), el('td', {}, compact(r.total)));
+      tb.append(tr);
+    }
+    table.append(tb); compatEl.append(table);
+  }
+
   function renderSub(cur) {
     const sub = document.getElementById('sub'); sub.replaceChildren();
     if (!cur) { sub.append(el('span', {}, state.error ? 'Not responding: ' + state.error : 'Connecting…')); return; }
@@ -555,7 +580,7 @@ footer code { font-size: 12px; }
   }
 
   function renderAll() {
-    renderSub(state.current); renderTiles(state.current); renderThreads(state.current); renderReasons(state.current);
+    renderSub(state.current); renderTiles(state.current); renderThreads(state.current); renderReasons(state.current); renderNonStandard(state.current);
     renderHealth(evaluate(state.current, state.history));
     for (const def of CHARTS) {
       renderChart(def, state.history);

@@ -87,7 +87,8 @@ static void testMalformedInputNeverCrashes() {
 		{{"action", 5}},
 		{{"action", "announce"}, {"event", 5}},
 		{{"action", "announce"}, {"info_hash", 5}, {"peer_id", peerId('a')}},
-		{{"action", "announce"}, {"info_hash", "short"}, {"peer_id", peerId('a')}},
+		{{"action", "announce"}, {"info_hash", ""}, {"peer_id", peerId('a')}},
+		{{"action", "announce"}, {"info_hash", std::string(65, 'x')}, {"peer_id", peerId('a')}},
 		{{"action", "announce"}, {"info_hash", IH1}, {"peer_id", std::string(10000, 'x')}},
 		{{"action", "announce"}, {"info_hash", IH1}, {"peer_id", peerId('a')}, {"offers", "nope"}},
 		{{"action", "announce"}, {"info_hash", IH1}, {"peer_id", peerId('a')}, {"answer", 1}, {"to_peer_id", peerId('b')}},
@@ -454,10 +455,15 @@ static void testMultiplePeerIdsPerConnection() {
 	tracker.processMessage(answerMessage(IH1, peerId('x'), peerId('b'), "s1"), &shared.ctx);
 	CHECK(answersWithSdp(b, "s1") == 1);
 
-	// The answer must come from a peer ID this connection announced in that swarm
-	CHECK(throwsTrackerException(tracker, answerMessage(IH1, peerId('y'), peerId('b'), "s2"), &shared.ctx));
+	// A peer ID live on another connection can't answer from here
 	CHECK(throwsTrackerException(tracker, answerMessage(IH1, peerId('x'), peerId('b'), "s2"), &c.ctx));
 	CHECK(answersWithSdp(b, "s2") == 0);
+	// A peer ID of this connection that isn't in that swarm joins it by answering
+	// (outside the protocol, see testAnswerWithoutAnnounce)
+	CHECK(!throwsTrackerException(tracker, answerMessage(IH1, peerId('y'), peerId('b'), "s2"), &shared.ctx));
+	CHECK(answersWithSdp(b, "s2") == 1);
+	CHECK(shared.ctx.hasMembership(peerId('y'), IH1));
+	tracker.processMessage(announce(IH1, peerId('y'), "stopped"), &shared.ctx);
 
 	// Target left: dropped without error, the shared connection keeps its other torrents
 	tracker.disconnectPeer(&b.ctx);
@@ -789,7 +795,7 @@ static void testFailureReasons() {
 	noOfferId.erase("offer_id");
 	json badAnswer = answerMessage(IH1, peerId('p'), peerId('o'), "s");
 	badAnswer["answer"] = {{"type", "answer"}};
-	json answerBadToPeer = answerMessage(IH1, peerId('p'), "short", "s");
+	json answerBadToPeer = answerMessage(IH1, peerId('p'), std::string(65, 't'), "s");
 	json stopBadPeer = {{"action", "announce"}, {"event", "stopped"}, {"info_hash", IH1}, {"peer_id", 5}};
 
 	// Client-visible messages are unchanged from the plain-string version
@@ -797,17 +803,16 @@ static void testFailureReasons() {
 		{json::array(), "not_object", "message must be a JSON object"},
 		{{{"action", 5}}, "action_not_string", "action field must be a string"},
 		{{{"action", "announce"}, {"event", 5}}, "event_not_string", "event field must be a string"},
-		{announce(IH1, peerId('p'), "bogus"), "unknown_event", "unknown announce event"},
 		{{{"action", "unknown"}}, "unknown_action", "unknown action"},
-		{announce("short", peerId('p')), "announce_info_hash", "info_hash field is missing or wrong"},
-		{announce(IH1, "short"), "announce_peer_id", "peer_id field is missing or wrong"},
+		{announce("", peerId('p')), "announce_info_hash", "info_hash field is missing or wrong"},
+		{announce(IH1, std::string(65, 'p')), "announce_peer_id", "peer_id field is missing or wrong"},
 		{{{"action", "announce"}, {"info_hash", IH1}, {"peer_id", peerId('p')}, {"offers", "x"}}, "offers_not_array", "announce: offers field is not an array"},
-		{answerMessage("short", peerId('p'), peerId('o'), "s"), "answer_info_hash", "info_hash field is missing or wrong"},
-		{answerMessage(IH1, "short", peerId('o'), "s"), "answer_peer_id", "peer_id field is missing or wrong"},
+		{answerMessage("", peerId('p'), peerId('o'), "s"), "answer_info_hash", "info_hash field is missing or wrong"},
+		{answerMessage(IH1, "", peerId('o'), "s"), "answer_peer_id", "peer_id field is missing or wrong"},
 		{answerBadToPeer, "answer_to_peer_id", "to_peer_id field is missing or wrong"},
 		{badAnswer, "bad_answer", "answer: answer field is missing or wrong"},
 		{noOfferId, "bad_offer_id", "answer: offer_id field is missing or wrong"},
-		{answerMessage(IH1, peerId('p'), peerId('o'), "s"), "answer_not_in_swarm", "answer: peer_id is not in the swarm on this connection"},
+		{answerMessage(IH1, peerId('o'), peerId('p'), "s"), "answer_peer_id_taken", "answer: peer_id belongs to another connection"},
 		{{{"action", "announce"}, {"event", "stopped"}}, "stop_info_hash", "info_hash field is missing or wrong"},
 		{stopBadPeer, "stop_peer_id", "peer_id field is missing or wrong"},
 		{{{"action", "scrape"}}, "full_scrape_disabled", "scrape: full scrape is disabled"},
@@ -852,7 +857,7 @@ static void testFailureReasons() {
 static void testFailureReasonMetrics() {
 	Metrics metrics;
 	metrics.init(1);
-	const size_t answerNotInSwarm = static_cast<size_t>(FailureReason::AnswerNotInSwarm);
+	const size_t answerNotInSwarm = static_cast<size_t>(FailureReason::AnswerPeerIdTaken);
 	const size_t badOffer = static_cast<size_t>(FailureReason::BadOffer);
 
 	auto sample = [&](int64_t timeMs, uint64_t notInSwarm, uint64_t offers) {
@@ -874,9 +879,9 @@ static void testFailureReasonMetrics() {
 	sample(1000000, 100, 0);
 	json current = json::parse(*metrics.current());
 	CHECK(current["failureReasons"].size() == FAILURE_REASON_COUNT);
-	CHECK(reasonOf(current, "answer_not_in_swarm")["total"] == 100);
-	CHECK(reasonOf(current, "answer_not_in_swarm")["windowCount"] == 0);
-	CHECK(reasonOf(current, "answer_not_in_swarm")["rate"] == 0.0);
+	CHECK(reasonOf(current, "answer_peer_id_taken")["total"] == 100);
+	CHECK(reasonOf(current, "answer_peer_id_taken")["windowCount"] == 0);
+	CHECK(reasonOf(current, "answer_peer_id_taken")["rate"] == 0.0);
 
 	// 5 s samples for 20 minutes: 2 failures per sample, one bad offer per minute
 	int64_t t = 1000000;
@@ -888,8 +893,8 @@ static void testFailureReasonMetrics() {
 		sample(t, n, offers);
 	}
 	current = json::parse(*metrics.current());
-	json r = reasonOf(current, "answer_not_in_swarm");
-	CHECK(r["message"] == "answer: peer_id is not in the swarm on this connection");
+	json r = reasonOf(current, "answer_peer_id_taken");
+	CHECK(r["message"] == "answer: peer_id belongs to another connection");
 	CHECK(r["total"] == n);
 	CHECK(r["rate"] == 0.4);              // 2 per 5 s
 	CHECK(r["windowCount"] == 360);       // 15 min window = 180 samples
@@ -1015,6 +1020,185 @@ static void testIsLoopback() {
 	CHECK(!Utils::isLoopback(""));
 }
 
+// --- Deviations from the WebTorrent protocol (README: "Deviations from the WebTorrent protocol") ---
+
+static void testOpaqueIds() {
+	FastTracker tracker;
+	FakePeer a, b;
+	const std::string b64 = "JhMOjx9NZsExpIDm5Y1u6j2puX5Bij6PuNdzcTvaqOo="; // base64 SHA-256, 44 bytes
+	const std::string hex = std::string(64, 'f');                         // hex SHA-256, the longest accepted
+	const std::string shortPeer = "rmi325ty2roqtkuk";                       // 16 bytes
+
+	// Accepted as opaque keys and echoed back unchanged
+	tracker.processMessage(announce(b64, shortPeer), &a.ctx);
+	CHECK(a.inbox.back()["info_hash"] == b64);
+	CHECK(tracker.getSwarms().count(b64) == 1);
+	CHECK(tracker.getCompatCounters().nonStandardIds == 1);
+
+	// Two peers with the same opaque hash meet, offers and answers are relayed
+	tracker.processMessage(announce(b64, "peer-two", "started", 1), &b.ctx);
+	CHECK(countOffers(a) == 1);
+	json offer = a.inbox.back();
+	CHECK(offer["peer_id"] == "peer-two");
+	CHECK(offer["info_hash"] == b64);
+	tracker.processMessage(answerMessage(b64, shortPeer, "peer-two", "ans"), &a.ctx);
+	CHECK(answersWithSdp(b, "ans") == 1);
+	CHECK(b.inbox.back()["peer_id"] == shortPeer);
+	CHECK(tracker.getCompatCounters().nonStandardIds == 3);
+
+	// Hex is not converted: it's a different key from the binary hash
+	tracker.processMessage(announce(hex, peerId('h')), &a.ctx);
+	CHECK(tracker.getSwarms().count(hex) == 1);
+
+	// Scrape takes the same keys
+	tracker.processMessage({{"action", "scrape"}, {"info_hash", b64}}, &a.ctx);
+	CHECK(a.inbox.back()["files"][b64]["incomplete"] == 2);
+
+	// Stop with opaque keys
+	tracker.processMessage(announce(b64, "peer-two", "stopped"), &b.ctx);
+	CHECK(tracker.getSwarms().at(b64)->getPeersCount() == 1);
+
+	// Standard ids are not counted
+	uint64_t before = tracker.getCompatCounters().nonStandardIds;
+	tracker.processMessage(announce(IH1, peerId('s')), &b.ctx);
+	CHECK(tracker.getCompatCounters().nonStandardIds == before);
+
+	// Still rejected: empty, too long, not a string
+	CHECK(failureOf(tracker, announce("", peerId('s')), &b.ctx) == "announce_info_hash");
+	CHECK(failureOf(tracker, announce(std::string(65, 'x'), peerId('s')), &b.ctx) == "announce_info_hash");
+	CHECK(failureOf(tracker, announce(IH1, std::string(65, 'x')), &b.ctx) == "announce_peer_id");
+	CHECK(failureOf(tracker, {{"action", "announce"}, {"info_hash", json::array({IH1})}, {"peer_id", peerId('s')}}, &b.ctx) == "announce_info_hash");
+	// 64 bytes of UTF-8 (32 two-byte characters) is the limit, not 64 characters
+	std::string utf8;
+	for (int i = 0; i < 33; i++) utf8 += "\xC3\xA9";
+	CHECK(failureOf(tracker, announce(utf8, peerId('s')), &b.ctx) == "announce_info_hash");
+	CHECK(failureOf(tracker, announce(utf8.substr(0, 64), peerId('s')), &b.ctx) == "none");
+	// Scrape skips invalid entries in a list, rejects a single invalid one
+	tracker.processMessage({{"action", "scrape"}, {"info_hash", {b64, "", std::string(65, 'x')}}}, &b.ctx);
+	CHECK(b.inbox.back()["files"].size() == 1);
+	CHECK(failureOf(tracker, {{"action", "scrape"}, {"info_hash", ""}}, &b.ctx) == "bad_scrape_info_hash");
+}
+
+static void testUnknownEventIsUpdate() {
+	FastTracker tracker;
+	FakePeer a, b;
+	tracker.processMessage(announce(IH1, peerId('a')), &a.ctx);
+	tracker.processMessage(announce(IH1, peerId('b')), &b.ctx);
+	CHECK(tracker.getCompatCounters().unknownEvents == 0);
+
+	// Gopeed's re-announce: handled like "update" (reply, offers relayed)
+	size_t before = a.inbox.size();
+	tracker.processMessage(announce(IH1, peerId('a'), "<regular>", 1), &a.ctx);
+	CHECK(a.inbox.size() == before + 1);
+	CHECK(a.inbox.back()["interval"].is_number());
+	CHECK(countOffers(b) == 1);
+	CHECK(tracker.getCompatCounters().unknownEvents == 1);
+	CHECK(tracker.getSwarms().at(IH1)->getIncompleteCount() == 2);
+
+	// An unknown event on a new peer joins the swarm, like "update" does
+	FakePeer c;
+	tracker.processMessage(announce(IH1, peerId('c'), "whatever"), &c.ctx);
+	CHECK(tracker.getSwarms().at(IH1)->getPeersCount() == 3);
+	CHECK(tracker.getCompatCounters().unknownEvents == 2);
+
+	// With an answer, it's an answer
+	tracker.processMessage(announce(IH1, peerId('b'), "", 1), &b.ctx);
+	json answer = answerMessage(IH1, peerId('a'), peerId('b'), "via-unknown-event");
+	answer["event"] = "<regular>";
+	tracker.processMessage(answer, &a.ctx);
+	CHECK(answersWithSdp(b, "via-unknown-event") == 1);
+	CHECK(tracker.getCompatCounters().unknownEvents == 3);
+
+	// Known events are not counted; a non-string event is still an error
+	tracker.processMessage(announce(IH1, peerId('a'), "update"), &a.ctx);
+	tracker.processMessage(announce(IH1, peerId('a'), "empty"), &a.ctx);
+	tracker.processMessage(announce(IH1, peerId('a'), "paused"), &a.ctx);
+	CHECK(tracker.getCompatCounters().unknownEvents == 3);
+	CHECK(failureOf(tracker, {{"action", "announce"}, {"event", 5}, {"info_hash", IH1}, {"peer_id", peerId('a')}}, &a.ctx) == "event_not_string");
+	// A rejected request with an unknown event isn't counted
+	CHECK(failureOf(tracker, announce("", peerId('a'), "<regular>"), &a.ctx) == "announce_info_hash");
+	CHECK(tracker.getCompatCounters().unknownEvents == 3);
+}
+
+static void testAnswerWithoutAnnounce() {
+	TrackerOptions options;
+	options.maxSwarmsPerPeer = 2;
+	FastTracker tracker(options);
+	FakePeer offerer, oldConn, newConn;
+
+	// qBittorrent receives an offer on one connection...
+	tracker.processMessage(announce(IH1, peerId('q')), &oldConn.ctx);
+	tracker.processMessage(announce(IH1, peerId('w'), "started", 1), &offerer.ctx);
+	CHECK(countOffers(oldConn) == 1);
+	// ...that connection closes, and the answer comes on a fresh one
+	tracker.disconnectPeer(&oldConn.ctx);
+	CHECK(tracker.getPeerIdCount() == 1);
+	tracker.processMessage(answerMessage(IH1, peerId('q'), peerId('w'), "late"), &newConn.ctx);
+	CHECK(answersWithSdp(offerer, "late") == 1);
+	CHECK(offerer.inbox.back()["peer_id"] == peerId('q'));
+	// The sender joined the swarm on the new connection (as a leecher)
+	CHECK(newConn.ctx.hasMembership(peerId('q'), IH1));
+	CHECK(tracker.getSwarms().at(IH1)->getIncompleteCount() == 2);
+	CHECK(tracker.getMembershipCount() == 2);
+	CHECK(tracker.getCompatCounters().answersWithoutAnnounce == 1);
+	// No announce reply is sent for an answer
+	CHECK(newConn.inbox.empty());
+
+	// Once registered, further answers are normal
+	tracker.processMessage(answerMessage(IH1, peerId('q'), peerId('w'), "again"), &newConn.ctx);
+	CHECK(answersWithSdp(offerer, "again") == 1);
+	CHECK(tracker.getCompatCounters().answersWithoutAnnounce == 1);
+
+	// A peer ID live on another connection can't be taken over by answering
+	FakePeer thief;
+	CHECK(failureOf(tracker, answerMessage(IH1, peerId('q'), peerId('w'), "x"), &thief.ctx) == "answer_peer_id_taken");
+	CHECK(answersWithSdp(offerer, "x") == 0);
+	CHECK(thief.ctx.membershipCount == 0);
+
+	// No swarm for that info_hash: dropped, nothing created
+	FakePeer stray;
+	CHECK(failureOf(tracker, answerMessage(IH2, peerId('s'), peerId('w'), "y"), &stray.ctx) == "none");
+	CHECK(tracker.getSwarms().count(IH2) == 0);
+	CHECK(stray.ctx.membershipCount == 0);
+	CHECK(tracker.getPeerIdCount() == 2);
+
+	// The torrent limit applies to memberships added by answering
+	FakePeer full;
+	tracker.processMessage(announce(IH2, peerId('f')), &full.ctx);
+	tracker.processMessage(announce(std::string(20, 'c'), peerId('f')), &full.ctx);
+	CHECK(failureOf(tracker, answerMessage(IH1, peerId('g'), peerId('w'), "z"), &full.ctx) == "too_many_torrents");
+	CHECK(answersWithSdp(offerer, "z") == 0);
+
+	// Registered memberships expire like announced ones and are removed on close
+	tracker.disconnectPeer(&newConn.ctx);
+	CHECK(tracker.getSwarms().at(IH1)->getPeersCount() == 1);
+	CHECK(tracker.getMembershipCount() == 3);
+}
+
+static void testNonStandardMetrics() {
+	Metrics metrics;
+	metrics.init(1);
+	auto sample = [&](int64_t timeMs, uint64_t ids, uint64_t events, uint64_t answers) {
+		MetricsSample s;
+		s.timeMs = timeMs;
+		s.compat.nonStandardIds = ids;
+		s.compat.unknownEvents = events;
+		s.compat.answersWithoutAnnounce = answers;
+		metrics.record(s);
+	};
+	sample(1000000, 0, 0, 0);
+	sample(1005000, 100, 5, 20);
+	json current = json::parse(*metrics.current());
+	CHECK(current["nonStandard"].size() == 3);
+	std::map<std::string, json> byKey;
+	for (const auto& x : current["nonStandard"]) byKey[x["key"]] = x;
+	CHECK(byKey["non_standard_ids"]["rate"] == 20.0);
+	CHECK(byKey["non_standard_ids"]["total"] == 100);
+	CHECK(byKey["unknown_events"]["windowCount"] == 5);
+	CHECK(byKey["answers_without_announce"]["windowRate"] == 4.0);
+	CHECK(!byKey["answers_without_announce"]["description"].get<std::string>().empty());
+}
+
 #define RUN(t) do { if (std::getenv("OWT_TEST_VERBOSE")) std::cerr << #t << std::endl; t(); } while (0)
 
 int main() {
@@ -1044,6 +1228,10 @@ int main() {
 	RUN(testFailureSampleStore);
 	RUN(testFailureDiagnosis);
 	RUN(testIsLoopback);
+	RUN(testOpaqueIds);
+	RUN(testUnknownEventIsUpdate);
+	RUN(testAnswerWithoutAnnounce);
+	RUN(testNonStandardMetrics);
 
 	if (failures) {
 		std::cerr << failures << " check(s) failed" << std::endl;

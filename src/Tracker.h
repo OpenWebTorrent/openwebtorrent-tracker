@@ -1,6 +1,7 @@
 #ifndef OWT_TRACKER_H
 #define OWT_TRACKER_H
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -29,6 +30,20 @@ struct TrackerOptions {
 	bool allowFullScrape = false;
 	// Maximum number of info hashes in a single scrape request
 	size_t maxScrapeInfoHashes = 100;
+};
+
+// Requests accepted only because the tracker is more lenient than the
+// WebTorrent protocol (see "Deviations from the WebTorrent protocol" in the
+// README). Cumulative counts.
+struct CompatCounters {
+	// Announce, answer or stop whose info_hash, peer_id or to_peer_id isn't a
+	// 20-byte binary string
+	uint64_t nonStandardIds = 0;
+	// Announce with an unknown event, handled as a regular update
+	uint64_t unknownEvents = 0;
+	// Answer from a peer ID that hadn't announced that torrent on its
+	// connection: the peer was added to the swarm
+	uint64_t answersWithoutAnnounce = 0;
 };
 
 class Tracker {
@@ -70,6 +85,8 @@ public:
 	// Tracker state relevant to a rejected request, for debugging. Called
 	// under the server lock, only for sampled failures.
 	virtual json diagnose(const json& data, const PeerContext* peer) const { return json::object(); }
+
+	virtual CompatCounters getCompatCounters() const { return {}; }
 
 };
 

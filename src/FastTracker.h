@@ -2,6 +2,7 @@
 #ifndef OWT_FASTTRACKER_H
 #define OWT_FASTTRACKER_H
 
+#include <initializer_list>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -59,6 +60,15 @@ public:
 		return this->seederTotal;
 	}
 
+	CompatCounters getCompatCounters() const override {
+		return this->compat;
+	}
+
+	// Longest accepted info_hash / peer_id / to_peer_id, in bytes. The WebTorrent
+	// protocol uses 20-byte binary strings (up to 40 bytes as UTF-8); other
+	// clients send hex or base64 hashes, e.g. 64 bytes for a hex SHA-256.
+	static constexpr size_t MAX_ID_BYTES = 64;
+
 	void processMessage(const json& data, PeerContext* peer) override {
 		if (!data.is_object()) {
 			throw TrackerException(FailureReason::NotObject);
@@ -69,20 +79,26 @@ public:
 		if (action == "announce") {
 			std::string event = optionalString(data, "event", FailureReason::EventNotString);
 
-			if (event == "" || event == "update" || event == "paused") {
-				if (data.contains("answer")) {
-					this->processAnswer(data, peer);
-				} else {
-					this->processAnnounce(data, peer, false, event == "paused");
-				}
-			} else if (event == "started") {
+			if (event == "started") {
 				this->processAnnounce(data, peer);
 			} else if (event == "stopped") {
 				this->processStop(data, peer);
 			} else if (event == "completed") {
 				this->processAnnounce(data, peer, true);
 			} else {
-				throw TrackerException(FailureReason::UnknownEvent);
+				// "", "update", "empty" (like bittorrent-tracker) and "paused" are
+				// regular updates. Unknown events are too, outside the protocol
+				// (e.g. Gopeed sends "<regular>").
+				bool known = event == "" || event == "update" || event == "empty" || event == "paused";
+				if (data.contains("answer")) {
+					this->processAnswer(data, peer);
+				} else {
+					this->processAnnounce(data, peer, false, event == "paused");
+				}
+				// Counted once the request is accepted
+				if (!known) {
+					this->compat.unknownEvents++;
+				}
 			}
 		} else if (action == "scrape") {
 			this->processScrape(data, peer);
@@ -243,18 +259,40 @@ private:
 		return it->get<std::string>();
 	}
 
-	// info_hash and peer_id are 20-byte binary strings (one code point per byte)
-	static std::string requireBinaryId(const json& data, const char* key, FailureReason reason) {
+	// info_hash, peer_id and to_peer_id are opaque keys: any non-empty string
+	// up to MAX_ID_BYTES. The protocol only defines 20-byte binary strings; we
+	// accept other formats like the original Node tracker did (see README).
+	static bool isValidId(const json& value) {
+		if (!value.is_string()) {
+			return false;
+		}
+		size_t size = value.get_ref<const std::string&>().size();
+		return size > 0 && size <= MAX_ID_BYTES;
+	}
+
+	static std::string requireId(const json& data, const char* key, FailureReason reason) {
 		auto it = data.find(key);
-		if (it == data.end() || !it->is_string() || Utils::binaryStringLength(it->get_ref<const std::string&>()) != 20) {
+		if (it == data.end() || !isValidId(*it)) {
 			throw TrackerException(reason);
 		}
 		return it->get<std::string>();
 	}
 
-	static bool isValidInfoHash(const json& value) {
-		return value.is_string() && Utils::binaryStringLength(value.get_ref<const std::string&>()) == 20;
+	// What the protocol specifies: 20 bytes, one code point per byte
+	static bool isStandardId(const std::string& id) {
+		return Utils::binaryStringLength(id) == 20;
 	}
+
+	void countNonStandardIds(std::initializer_list<const std::string*> ids) {
+		for (const std::string* id : ids) {
+			if (!isStandardId(*id)) {
+				this->compat.nonStandardIds++;
+				return;
+			}
+		}
+	}
+
+	CompatCounters compat;
 
 	// Associates a peer ID with the connection. A peer ID announced on
 	// another connection moves here; other peer IDs of that connection stay.
@@ -268,8 +306,8 @@ private:
 
 	void processAnnounce(const json& data, PeerContext* connection, bool completed = false, bool paused = false) {
 		// Validate params
-		std::string infoHash = requireBinaryId(data, "info_hash", FailureReason::AnnounceInfoHash);
-		std::string peerId = requireBinaryId(data, "peer_id", FailureReason::AnnouncePeerId);
+		std::string infoHash = requireId(data, "info_hash", FailureReason::AnnounceInfoHash);
+		std::string peerId = requireId(data, "peer_id", FailureReason::AnnouncePeerId);
 
 		auto offersIt = data.find("offers");
 		if (offersIt != data.end() && !offersIt->is_array()) {
@@ -282,6 +320,7 @@ private:
 			throw TrackerException(FailureReason::TooManyTorrents);
 		}
 
+		this->countNonStandardIds({&infoHash, &peerId});
 		this->claimPeerId(connection, peerId);
 		Swarm* swarm = this->addMembership(connection, peerId, infoHash);
 
@@ -313,9 +352,9 @@ private:
 
 	void processAnswer(const json& data, PeerContext* connection) {
 		// Validate params
-		std::string infoHash = requireBinaryId(data, "info_hash", FailureReason::AnswerInfoHash);
-		std::string peerId = requireBinaryId(data, "peer_id", FailureReason::AnswerPeerId);
-		std::string toPeerId = requireBinaryId(data, "to_peer_id", FailureReason::AnswerToPeerId);
+		std::string infoHash = requireId(data, "info_hash", FailureReason::AnswerInfoHash);
+		std::string peerId = requireId(data, "peer_id", FailureReason::AnswerPeerId);
+		std::string toPeerId = requireId(data, "to_peer_id", FailureReason::AnswerToPeerId);
 
 		const json& answer = data["answer"];
 		if (!answer.is_object() || !answer.contains("sdp") || !answer["sdp"].is_string()) {
@@ -325,14 +364,35 @@ private:
 			throw TrackerException(FailureReason::BadOfferId);
 		}
 
-		// The sender must have announced this torrent with this peer ID on this connection
+		auto swarmIt = this->swarms.find(infoHash);
 		if (!connection->hasMembership(peerId, infoHash)) {
-			throw TrackerException(FailureReason::AnswerNotInSwarm);
+			// A peer ID that is live on another connection can't be used here
+			auto owner = this->peers.find(peerId);
+			if (owner != this->peers.end() && owner->second != connection) {
+				throw TrackerException(FailureReason::AnswerPeerIdTaken);
+			}
+			// Outside the protocol: the sender hasn't announced this torrent on
+			// this connection. libtorrent (qBittorrent) does this when it answers
+			// an offer on a new connection. Like bittorrent-tracker, which treats
+			// an answer as an announce, add the sender to the swarm (if there is
+			// one: otherwise nobody can receive the answer).
+			if (swarmIt == this->swarms.end()) {
+				DOUT("answer: no swarm for this info_hash");
+				return;
+			}
+			size_t maxMemberships = this->options.maxSwarmsPerPeer;
+			if (maxMemberships > 0 && connection->membershipCount >= maxMemberships) {
+				throw TrackerException(FailureReason::TooManyTorrents);
+			}
+			this->claimPeerId(connection, peerId);
+			this->addMembership(connection, peerId, infoHash);
+			this->compat.answersWithoutAnnounce++;
+			swarmIt = this->swarms.find(infoHash);
 		}
+		this->countNonStandardIds({&infoHash, &peerId, &toPeerId});
 
 		// The target may have just left, which is a normal race, so the
 		// answer is silently dropped.
-		auto swarmIt = this->swarms.find(infoHash);
 		const Swarm::Member* target = swarmIt == this->swarms.end() ? nullptr : swarmIt->second->findPeer(toPeerId);
 		if (target == nullptr) {
 			DOUT("answer: to_peer_id is not in the swarm");
@@ -344,8 +404,9 @@ private:
 
 	void processStop(const json& data, PeerContext* connection) {
 		// Validate params
-		std::string infoHash = requireBinaryId(data, "info_hash", FailureReason::StopInfoHash);
-		std::string peerId = requireBinaryId(data, "peer_id", FailureReason::StopPeerId);
+		std::string infoHash = requireId(data, "info_hash", FailureReason::StopInfoHash);
+		std::string peerId = requireId(data, "peer_id", FailureReason::StopPeerId);
+		this->countNonStandardIds({&infoHash, &peerId});
 
 		// Ignored if this connection doesn't own that membership
 		this->removeMembership(connection, peerId, infoHash);
@@ -388,11 +449,11 @@ private:
 				throw TrackerException(FailureReason::TooManyScrapeHashes);
 			}
 			for (const auto& item : *infoHashIt) {
-				if (isValidInfoHash(item)) {
+				if (isValidId(item)) {
 					addFile(item.get<std::string>());
 				}
 			}
-		} else if (isValidInfoHash(*infoHashIt)) {
+		} else if (isValidId(*infoHashIt)) {
 			addFile(infoHashIt->get<std::string>());
 		} else {
 			throw TrackerException(FailureReason::BadScrapeInfoHash);
