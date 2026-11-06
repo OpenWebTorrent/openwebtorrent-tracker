@@ -15,6 +15,7 @@ namespace owt {
 	X(NotObject,             "not_object",              "message must be a JSON object") \
 	X(ActionNotString,       "action_not_string",       "action field must be a string") \
 	X(EventNotString,        "event_not_string",        "event field must be a string") \
+	X(UnknownEvent,          "unknown_event",           "unknown announce event") \
 	X(UnknownAction,         "unknown_action",          "unknown action") \
 	X(AnnounceInfoHash,      "announce_info_hash",      "info_hash field is missing or wrong") \
 	X(AnnouncePeerId,        "announce_peer_id",        "peer_id field is missing or wrong") \
