@@ -47,6 +47,13 @@ struct ServerOptions {
 	// Worker threads handling connections (0 = one per CPU core)
 	unsigned int threads = 0;
 
+	// Seconds without data from a client before it is pinged, plus a 16 s
+	// margin (4 or 8 s below 32 s) for the pong before the connection is
+	// closed. Announces come every 2 minutes, slower than proxies drop idle
+	// connections (nginx: 60 s by default), so the ping keeps them open:
+	// 56 pings after 40-44 s.
+	unsigned short idleTimeout = 56;
+
 	// Take the client address from X-Forwarded-For (only behind a reverse proxy)
 	bool trustProxy = false;
 	// Maximum simultaneous connections per IPv4 address or IPv6 /64 (0 = unlimited)
@@ -172,6 +179,7 @@ private:
 		this->metrics.acceptorTid = Metrics::currentTid();
 		this->metrics.config = {
 			{"threads", threads},
+			{"idleTimeout", this->options.idleTimeout},
 			{"announceInterval", this->options.tracker.announceInterval},
 			{"announceJitterPercent", this->options.tracker.announceIntervalJitter * 100},
 			{"rateLimit", this->options.messageRate},
@@ -289,7 +297,7 @@ private:
 			/* Settings */
 			.compression = uWS::SHARED_COMPRESSOR,
 			.maxPayloadLength = 64 * 1024,
-			.idleTimeout = 240,
+			.idleTimeout = this->options.idleTimeout,
 			.maxBackpressure = 1 * 1024 * 1024,
 			// A client that doesn't read 1 MiB of signaling messages is dead or abusive
 			.closeOnBackpressureLimit = true,

@@ -16,6 +16,9 @@ const LIMITED_URL = `ws://127.0.0.1:${LIMITED_PORT}`
 // Third tracker for test-peer-ids.js and test-paused.js (short interval to test expiry)
 const SUITES_PORT = PORT + 2
 const SUITES_INTERVAL = 2
+// Fourth tracker with the shortest idle timeout: pings after 4-8 s, closes 4-8 s later
+const IDLE_PORT = PORT + 3
+const IDLE_URL = `ws://127.0.0.1:${IDLE_PORT}`
 
 const INFO_HASH = 'i'.repeat(20)
 const id = (c) => c.repeat(20)
@@ -35,14 +38,15 @@ function startTracker (port, args = []) {
 before(() => Promise.all([
   startTracker(PORT),
   startTracker(LIMITED_PORT, ['--rate-limit', '5', '--rate-burst', '10', '--max-connections-per-ip', '2', '--trust-proxy']),
-  startTracker(SUITES_PORT, ['--announce-interval', String(SUITES_INTERVAL), '--allow-full-scrape'])
+  startTracker(SUITES_PORT, ['--announce-interval', String(SUITES_INTERVAL), '--allow-full-scrape']),
+  startTracker(IDLE_PORT, ['--idle-timeout', '8'])
 ]))
 
 after(() => trackers.forEach((t) => t.kill()))
 
-function connect (url = URL, headers = {}) {
+function connect (url = URL, headers = {}, options = {}) {
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket(url, { headers })
+    const socket = new WebSocket(url, { headers, ...options })
     socket.messages = []
     socket.waiters = []
     socket.on('message', (data) => {
@@ -268,6 +272,40 @@ test('connections per IP are limited', async () => {
   await wait(100)
   const e = await connect(LIMITED_URL, { 'X-Forwarded-For': '10.0.0.2' })
   for (const s of [b, c, d, e]) s.close()
+})
+
+test('idle clients are pinged, and closed only if they do not answer', async () => {
+  const closedAt = (socket) => new Promise((resolve) => socket.on('close', () => resolve(Date.now())))
+  const start = Date.now()
+
+  // Answers pings, like browsers and libtorrent do
+  const alive = await connect(IDLE_URL)
+  let pings = 0
+  alive.on('ping', () => pings++)
+  // Never answers: a dead client or a broken network path
+  const dead = await connect(IDLE_URL, {}, { autoPong: false })
+  const deadClosed = closedAt(dead)
+  const aliveClosed = closedAt(alive)
+
+  const deadAt = await Promise.race([deadClosed, wait(20000).then(() => null)])
+  assert.ok(deadAt !== null, 'a client that ignores pings is closed')
+  assert.ok(deadAt - start >= 6000, `closed only after the ping went unanswered (${deadAt - start} ms)`)
+
+  // Two idle periods later the answering client is still connected
+  const aliveAt = await Promise.race([aliveClosed, wait(Math.max(0, start + 20000 - Date.now())).then(() => null)])
+  assert.strictEqual(aliveAt, null, 'a client that answers pings stays connected')
+  assert.ok(pings >= 2, `pinged once per idle period (${pings} pings)`)
+  alive.close()
+})
+
+test('idle timeout outside the range uWebSockets accepts is rejected', async () => {
+  for (const value of ['7', '961']) {
+    const code = await new Promise((resolve) => {
+      const child = spawn(BIN, ['--no-ssl', '--port', String(PORT + 4), '--idle-timeout', value], { stdio: 'ignore' })
+      child.on('exit', resolve)
+    })
+    assert.strictEqual(code, 1, `--idle-timeout ${value}`)
+  }
 })
 
 // Multiple peer IDs per connection and BEP 21 suites (contributed in #27)

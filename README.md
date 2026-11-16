@@ -49,6 +49,7 @@ You can run it with the command below:
 | `-t, --threads` | `0` | Worker threads; `0` = one per CPU core. Falls back to the `OWT_THREADS` environment variable |
 | `--announce-interval` | `120` | Announce interval sent to clients, in seconds. Peers that don't announce for 2 intervals are dropped |
 | `--announce-jitter` | `10` | Randomize each reply's interval by up to this percent (0-50), so clients that connected together (e.g. after a restart) don't keep announcing in lockstep |
+| `--idle-timeout` | `56` | Seconds without data from a client before the tracker pings it (minus a 16 s margin, see below). Clients that don't answer the ping are closed (8-960) |
 | `-d, --debug` | | Log every message |
 
 ### Limits
@@ -66,6 +67,16 @@ When running behind a reverse proxy, every connection comes from the proxy's
 address: pass `--trust-proxy` (and make sure the proxy sets `X-Forwarded-For`)
 before enabling `--max-connections-per-ip`. Never use `--trust-proxy` when the
 tracker is directly reachable, since clients could then forge their address.
+
+Proxies also close websockets that stay idle for too long: nginx after
+`proxy_read_timeout` (60 seconds by default), and connections through
+Cloudflare to tracker.openwebtorrent.com were closed after 125 seconds.
+Clients only announce every couple of minutes, so the tracker pings idle
+clients itself, which resets those timers: after `--idle-timeout` minus 16
+seconds without data (minus 4 or 8 s below 32), i.e. after about 40 seconds
+by default (timeouts are checked every 4 seconds). Keep that below your
+proxy's timeout, or raise the proxy's timeout (e.g. `proxy_read_timeout 300s;`
+in nginx). Clients that don't answer the ping within the margin are closed.
 
 ### Monitoring
 
