@@ -67,6 +67,19 @@ async function scrapeFile(client, infoHash) {
   ).at(-1).files[infoHash];
 }
 
+// A client sees its own socket close before the tracker has processed it,
+// and the tracker may process it on another thread than the scrape: scrape
+// again until the counts settle, then let the caller assert on the last one.
+async function scrapeUntilSettled(client, infoHash, settled, maxWaitMs = timeoutMs) {
+  const started = Date.now();
+  let file = await scrapeFile(client, infoHash);
+  while (!settled(file) && Date.now() - started < maxWaitMs) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+    file = await scrapeFile(client, infoHash);
+  }
+  return file;
+}
+
 async function scrapeRequest(client, request) {
   const before = client.messages.filter(message => message.action === 'scrape').length;
   send(client, { action: 'scrape', ...request });
@@ -281,21 +294,9 @@ async function main() {
     partial.ws.terminate();
     await partialClosed;
 
-    scrapeCountBefore = observer.messages.filter(
-      message => message.action === 'scrape' && message.files && message.files[infoHash]
-    ).length;
-    send(observer, { action: 'scrape', info_hash: infoHash });
-    await waitFor(
-      () => observer.messages.filter(
-        message => message.action === 'scrape' && message.files && message.files[infoHash]
-      ).length > scrapeCountBefore,
-      'scrape after peer disconnect'
-    );
-    latestScrape = observer.messages.filter(
-      message => message.action === 'scrape' && message.files && message.files[infoHash]
-    ).at(-1);
-    assert.equal(latestScrape.files[infoHash].complete, 1);
-    assert.equal(latestScrape.files[infoHash].incomplete, 0, 'disconnect must remove paused peer from swarm counts');
+    const afterClose = await scrapeUntilSettled(observer, infoHash, file => file.incomplete === 0);
+    assert.equal(afterClose.complete, 1);
+    assert.equal(afterClose.incomplete, 0, 'disconnect must remove paused peer from swarm counts');
 
     // The same peer ID can reconnect and join the swarm again.
     const reconnect = createClient();
@@ -368,7 +369,7 @@ async function main() {
       }
     }
 
-    const afterDisconnect = await scrapeFile(observer, hashB);
+    const afterDisconnect = await scrapeUntilSettled(observer, hashB, file => file.incomplete === 0);
     assert.deepEqual([afterDisconnect.complete, afterDisconnect.incomplete, afterDisconnect.downloaders], [0, 0, 0],
       'disconnect must remove remaining multiplexed memberships');
 

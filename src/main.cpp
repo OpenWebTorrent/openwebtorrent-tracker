@@ -16,6 +16,7 @@ int main(int argc, char** argv) {
 		("c,ssl-cert", "SSL certificate", cxxopts::value<std::string>()->default_value("./localhost.pem"))
 		("no-ssl", "Serve plain websockets (e.g. behind a TLS-terminating proxy)")
 		("t,threads", "Worker threads (0 = one per CPU core; default: $OWT_THREADS or 0)", cxxopts::value<unsigned int>()->default_value("0"))
+		("idle-timeout", "Seconds without data before a client is pinged, plus up to 16 s for its pong before it is closed (8-960). Keep it below your proxy's idle timeout", cxxopts::value<int>()->default_value("56"))
 		("trust-proxy", "Use X-Forwarded-For as client address (only behind a reverse proxy)")
 		("max-connections-per-ip", "Max connections per IPv4 address or IPv6 /64 (0 = unlimited)", cxxopts::value<size_t>()->default_value("0"))
 		("rate-limit", "Max messages per second per connection (0 = unlimited)", cxxopts::value<double>()->default_value("50"))
@@ -56,6 +57,13 @@ int main(int argc, char** argv) {
 			return 1;
 		}
 
+		// Limits enforced by uWebSockets
+		int idleTimeout = result["idle-timeout"].as<int>();
+		if (idleTimeout < 8 || idleTimeout > 960) {
+			std::cerr << "Idle timeout must be between 8 and 960 seconds" << std::endl;
+			return 1;
+		}
+
 		owt::ServerOptions serverOptions;
 		serverOptions.port = port;
 		serverOptions.host = result["host"].as<std::string>();
@@ -73,6 +81,8 @@ int main(int argc, char** argv) {
 				serverOptions.threads = (unsigned int) value;
 			}
 		}
+
+		serverOptions.idleTimeout = (unsigned short) idleTimeout;
 
 		// Key & Cert
 		if (!result.count("no-ssl")) {
