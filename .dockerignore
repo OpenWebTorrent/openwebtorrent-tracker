@@ -1,0 +1,9 @@
+# Only what the build reads: the full submodules are about 1 GB
+*
+!CMakeLists.txt
+!cmake/
+!src/
+!deps/cxxopts/include/
+!deps/json/single_include/
+!deps/uWebSockets/src/
+!deps/uWebSockets/uSockets/src/

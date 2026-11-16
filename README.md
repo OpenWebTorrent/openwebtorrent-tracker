@@ -27,6 +27,45 @@ Then, build the project:
 make build
 ```
 
+## Docker
+
+Images for `linux/amd64` and `linux/arm64` are published to the GitHub
+Container Registry: `latest` follows `master`, and `v1.2.3` tags are
+published as `1.2.3` and `1.2`.
+
+```sh
+docker run -d --name tracker -p 8000:8000 --restart unless-stopped \
+	ghcr.io/openwebtorrent/openwebtorrent-tracker
+```
+
+By default the container serves plain `ws://` (`--no-ssl`) for a reverse
+proxy that terminates TLS. Arguments after the image name replace that
+default, so repeat `--no-ssl`:
+
+```sh
+docker run -d -p 8000:8000 -e OWT_THREADS=2 \
+	ghcr.io/openwebtorrent/openwebtorrent-tracker --no-ssl --trust-proxy
+```
+
+- **Threads:** the default (one per CPU core) counts the host's cores and
+  ignores `--cpus` limits, so set `OWT_THREADS` or `--threads` to the
+  container's share.
+- **TLS:** the default `--ssl-key` / `--ssl-cert` paths
+  (`localhost-key.pem`, `localhost.pem`) are relative to the working directory,
+  `/etc/openwebtorrent-tracker`. Mount a directory with both files there
+  (readable by any user, since the tracker doesn't run as root) and pass
+  arguments without `--no-ssl`:
+  `docker run -v ./certs:/etc/openwebtorrent-tracker:ro -p 8000:8000 ghcr.io/openwebtorrent/openwebtorrent-tracker --port 8000`.
+- The tracker runs as an unprivileged user under `tini`, so `docker stop`
+  shuts it down immediately.
+
+To build the image yourself:
+
+```sh
+make deps
+docker build -t openwebtorrent-tracker .
+```
+
 ## Usage
 
 You can run it with the command below:
@@ -250,6 +289,9 @@ make test
 
 # Integration tests against the built binary (requires Node.js 18+)
 cd tests/node && npm install && npm test
+
+# Smoke test against a running tracker, e.g. a container or a deployment
+node tests/node/smoke.js ws://127.0.0.1:8000
 ```
 
 ## License
