@@ -477,7 +477,10 @@ private:
 
 	template <bool SSL>
 	void onUpgrade(uWS::HttpResponse<SSL>* res, uWS::HttpRequest* req, struct us_socket_context_t* context) {
-		// Refused before running out of file descriptors (see connectionsForFileLimit)
+		// Refused before running out of file descriptors (see connectionsForFileLimit).
+		// Open connections are counted in onOpen, which upgrade() calls before
+		// returning, so each other worker can be between this check and its
+		// count: up to threads - 1 over the limit, well within the headroom.
 		if ((size_t) std::max<int64_t>(0, this->openConnections()) >= this->connectionLimit.load(std::memory_order_relaxed)) {
 			WorkerCounters::add(localCounters->refused);
 			res->writeStatus("503 Service Unavailable");

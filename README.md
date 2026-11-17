@@ -84,8 +84,9 @@ in nginx). Clients that don't answer the ping within the margin are closed.
 Every connection is a file descriptor. At startup the tracker raises its soft
 open file limit to the hard limit and keeps headroom below it (1/32 of the
 limit, 64 to 16384 descriptors, plus what its event loops use): past that,
-new connections get `503` instead of the tracker running out of descriptors,
-which would make it spin at 100% CPU retrying `accept()`. The startup line
+new connections get `503` (give or take one per worker thread) instead of the
+tracker running out of descriptors, which would make it spin at 100% CPU
+retrying `accept()`. The startup line
 shows the result (`up to N connections`), and so do `maxConnections` and
 `fileLimit` in `/stats/metrics.json` and the *Connection limit* check on
 `/status`.
