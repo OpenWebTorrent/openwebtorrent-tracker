@@ -59,6 +59,7 @@ You can run it with the command below:
 | `--rate-limit` | `50` | Messages per second per connection (`0` = unlimited). Connections that exceed it are closed with code 1008 |
 | `--rate-burst` | `500` | Messages a connection can send at once before the rate limit applies |
 | `--max-torrents-per-connection` | `1000` | Torrents a single connection can announce, across all its peer IDs (`0` = unlimited) |
+| `--max-connections` | `0` | Simultaneous connections (`0` = as many as the open file limit allows, see [Many connections](#many-connections)). Extra connections get `503` |
 | `--max-connections-per-ip` | `0` | Simultaneous connections per IPv4 address or IPv6 /64 (`0` = unlimited). Extra connections get `429` |
 | `--allow-full-scrape` | | Allow `scrape` without `info_hash`, which returns every torrent |
 | `--trust-proxy` | | Use the last `X-Forwarded-For` entry as the client address |
@@ -77,6 +78,47 @@ seconds without data (minus 4 or 8 s below 32), i.e. after about 40 seconds
 by default (timeouts are checked every 4 seconds). Keep that below your
 proxy's timeout, or raise the proxy's timeout (e.g. `proxy_read_timeout 300s;`
 in nginx). Clients that don't answer the ping within the margin are closed.
+
+### Many connections
+
+Every connection is a file descriptor. At startup the tracker raises its soft
+open file limit to the hard limit and keeps headroom below it (1/32 of the
+limit, 64 to 16384 descriptors, plus what its event loops use): past that,
+new connections get `503` instead of the tracker running out of descriptors,
+which would make it spin at 100% CPU retrying `accept()`. The startup line
+shows the result (`up to N connections`), and so do `maxConnections` and
+`fileLimit` in `/stats/metrics.json` and the *Connection limit* check on
+`/status`.
+
+For hundreds of thousands of connections:
+
+- **Open file limit:** set the hard limit above the connections you expect,
+  e.g. `LimitNOFILE=1048576` in a systemd unit, or
+  `--ulimit nofile=1048576:1048576` for Docker, whose containers usually start
+  with 1024 (soft) and 524288 (hard), about 508,000 connections. The kernel
+  caps it at `fs.nr_open` (1048576 by default).
+- **Docker networking:** run with `--network host`. With a published port
+  (`-p`), every connection goes through NAT and takes a conntrack entry, and
+  connections from the same host go through `docker-proxy`.
+- **conntrack:** once loaded (by Docker, or by a stateful firewall), the
+  kernel tracks every connection, even with host networking, and silently
+  drops new ones when the table is full (`nf_conntrack: table full, dropping
+  packet` in `dmesg`). The default size depends on RAM, often 262144. Raise it
+  (`sysctl -w net.netfilter.nf_conntrack_max=2097152`, about 300 bytes per
+  tracked connection), or don't track the tracker's port: with
+  `--network host` (a published port needs conntrack for NAT),
+  `iptables -t raw -A PREROUTING -p tcp --dport 8000 -j NOTRACK` and
+  `iptables -t raw -A OUTPUT -p tcp --sport 8000 -j NOTRACK`, the same with
+  `ip6tables`, and make sure your firewall accepts port 8000 without relying
+  on `ESTABLISHED` state.
+
+To see which limit is in effect on a running tracker:
+
+```sh
+grep 'open files' /proc/$(pidof openwebtorrent-tracker)/limits
+sysctl net.netfilter.nf_conntrack_count net.netfilter.nf_conntrack_max
+dmesg | grep -i conntrack
+```
 
 ### Monitoring
 

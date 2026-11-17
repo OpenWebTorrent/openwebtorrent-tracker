@@ -7,6 +7,8 @@
 #include <string_view>
 #include <iostream>
 #include <arpa/inet.h>
+#include <dirent.h>
+#include <sys/resource.h>
 
 namespace owt {
 namespace Utils {
@@ -80,6 +82,46 @@ namespace Logger {
 			return text;
 		}
 		return "";
+	}
+
+	// Raises the soft open file limit to the hard limit, since every connection
+	// is a file descriptor (systemd and Docker default to a soft limit of 1024).
+	// Returns the limit now in effect.
+	inline size_t raiseFileLimit() {
+		struct rlimit limit;
+		if (getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+			return 1024;
+		}
+		if (limit.rlim_cur < limit.rlim_max) {
+			struct rlimit raised = {limit.rlim_max, limit.rlim_max};
+			if (setrlimit(RLIMIT_NOFILE, &raised) == 0) {
+				limit = raised;
+			}
+		}
+		return limit.rlim_cur == RLIM_INFINITY ? SIZE_MAX : (size_t) limit.rlim_cur;
+	}
+
+	// Descriptors this process has open (0 if /proc isn't available)
+	inline size_t openFileCount() {
+		DIR* dir = opendir("/proc/self/fd");
+		if (dir == nullptr) {
+			return 0;
+		}
+		size_t count = 0;
+		while (struct dirent* entry = readdir(dir)) {
+			if (entry->d_name[0] != '.') count++;
+		}
+		closedir(dir);
+		// Not counting the descriptor of the listing itself
+		return count > 0 ? count - 1 : 0;
+	}
+
+	// Websockets that fit in a file limit with inUse descriptors already open.
+	// The rest is headroom for handshakes in progress and HTTP requests: when
+	// accept() runs out of descriptors, uSockets retries it in a busy loop.
+	inline size_t connectionsForFileLimit(size_t fileLimit, size_t inUse = 0) {
+		size_t headroom = std::clamp<size_t>(fileLimit / 32, 64, 16384) + inUse;
+		return fileLimit > headroom ? fileLimit - headroom : 0;
 	}
 
 	// 127.0.0.0/8, ::1 or ::ffff:127.0.0.0/104 (binary address from uWS)

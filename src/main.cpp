@@ -18,6 +18,7 @@ int main(int argc, char** argv) {
 		("t,threads", "Worker threads (0 = one per CPU core; default: $OWT_THREADS or 0)", cxxopts::value<unsigned int>()->default_value("0"))
 		("idle-timeout", "Seconds without data before a client is pinged, plus up to 16 s for its pong before it is closed (8-960). Keep it below your proxy's idle timeout", cxxopts::value<int>()->default_value("56"))
 		("trust-proxy", "Use X-Forwarded-For as client address (only behind a reverse proxy)")
+		("max-connections", "Max simultaneous connections (0 = as many as the open file limit allows)", cxxopts::value<size_t>()->default_value("0"))
 		("max-connections-per-ip", "Max connections per IPv4 address or IPv6 /64 (0 = unlimited)", cxxopts::value<size_t>()->default_value("0"))
 		("rate-limit", "Max messages per second per connection (0 = unlimited)", cxxopts::value<double>()->default_value("50"))
 		("rate-burst", "Max messages per connection in a burst", cxxopts::value<double>()->default_value("500"))
@@ -92,6 +93,7 @@ int main(int argc, char** argv) {
 
 		// Limits
 		serverOptions.trustProxy = result.count("trust-proxy") > 0;
+		serverOptions.maxConnections = result["max-connections"].as<size_t>();
 		serverOptions.maxConnectionsPerIp = result["max-connections-per-ip"].as<size_t>();
 		serverOptions.messageRate = result["rate-limit"].as<double>();
 		serverOptions.messageBurst = result["rate-burst"].as<double>();
