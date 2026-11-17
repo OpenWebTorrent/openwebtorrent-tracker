@@ -47,6 +47,17 @@ docker run -d -p 8000:8000 -e OWT_THREADS=2 \
 	ghcr.io/openwebtorrent/openwebtorrent-tracker --no-ssl --trust-proxy
 ```
 
+- **Many connections:** a container usually starts with an open file limit
+  of 1024 (soft) and 524288 (hard), and a published port puts every
+  connection through NAT and the kernel's conntrack table (often 262144
+  entries). For a large public tracker, use host networking and a higher
+  limit, and see [Many connections](#many-connections) for conntrack:
+
+  ```sh
+  docker run -d --name tracker --network host --restart unless-stopped \
+  	--ulimit nofile=1048576:1048576 \
+  	ghcr.io/openwebtorrent/openwebtorrent-tracker
+  ```
 - **Threads:** the default (one per CPU core) counts the host's cores and
   ignores `--cpus` limits, so set `OWT_THREADS` or `--threads` to the
   container's share.
