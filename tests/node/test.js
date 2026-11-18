@@ -26,8 +26,12 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const trackers = []
 
-function startTracker (port, args = []) {
-  const tracker = spawn(BIN, ['--no-ssl', '--host', '127.0.0.1', '--port', String(port), ...args], { stdio: ['ignore', 'pipe', 'inherit'] })
+// ulimit: shell ulimit arguments applied to the tracker (e.g. '-n 200'), via sh -c
+function startTracker (port, args = [], ulimit = null) {
+  const trackerArgs = ['--no-ssl', '--host', '127.0.0.1', '--port', String(port), ...args]
+  const tracker = ulimit
+    ? spawn('sh', ['-c', `ulimit ${ulimit} && exec "$0" "$@"`, BIN, ...trackerArgs], { stdio: ['ignore', 'pipe', 'inherit'] })
+    : spawn(BIN, trackerArgs, { stdio: ['ignore', 'pipe', 'inherit'] })
   trackers.push(tracker)
   return new Promise((resolve, reject) => {
     tracker.stdout.on('data', (d) => { if (d.toString().includes('Listening')) resolve() })
@@ -306,6 +310,81 @@ test('idle timeout outside the range uWebSockets accepts is rejected', async () 
     })
     assert.strictEqual(code, 1, `--idle-timeout ${value}`)
   }
+})
+
+const metricsOf = async (port) => (await fetch(`http://127.0.0.1:${port}/stats/metrics.json`)).json()
+
+// CPU time (user + system) of a process, in seconds
+function cpuSeconds (pid) {
+  const fields = require('node:fs').readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ')[1].split(' ')
+  return (Number(fields[11]) + Number(fields[12])) / 100
+}
+
+test('connections beyond --max-connections are refused with 503', async () => {
+  const port = PORT + 5
+  await startTracker(port, ['--max-connections', '3'])
+  const url = `ws://127.0.0.1:${port}`
+  const sockets = [await connect(url), await connect(url), await connect(url)]
+  await assert.rejects(connect(url), /503/)
+
+  // Refusals are sampled into the metrics every 5 s
+  let metrics
+  for (let tries = 0; tries < 30; tries++) {
+    metrics = await metricsOf(port)
+    if (metrics.totals.refused >= 1) break
+    await wait(500)
+  }
+  assert.strictEqual(metrics.config.maxConnections, 3)
+  assert.strictEqual(metrics.totals.refused, 1)
+
+  // A slot frees up when a client leaves
+  sockets.pop().close()
+  await wait(100)
+  sockets.push(await connect(url))
+  sockets.forEach((s) => s.close())
+})
+
+test('the connection limit leaves file descriptors to spare, so accept() never fails', async () => {
+  const port = PORT + 6
+  // Hard limit 200: 64 descriptors of headroom, minus those the event loops hold
+  await startTracker(port, ['--threads', '2'], '-n 200')
+  const pid = trackers.at(-1).pid
+  const { config } = await metricsOf(port)
+  assert.strictEqual(config.fileLimit, 200)
+  assert.ok(config.maxConnections > 100 && config.maxConnections < 136, `maxConnections ${config.maxConnections}`)
+
+  // More clients at once than there are descriptors
+  const attempts = 260
+  // Without the limit, accept() fails and clients past it hang: time them out
+  const results = await Promise.allSettled(Array.from({ length: attempts }, () => connect(`ws://127.0.0.1:${port}`, {}, { handshakeTimeout: 5000 })))
+  const open = results.filter((r) => r.status === 'fulfilled').map((r) => r.value)
+  const refused = results.filter((r) => r.status === 'rejected' && /503/.test(r.reason.message))
+  // Two workers: one upgrade can pass the check while the other is counted
+  assert.ok(open.length >= config.maxConnections && open.length <= config.maxConnections + 1,
+    `${open.length} connected, limit ${config.maxConnections}`)
+  assert.strictEqual(open.length + refused.length, attempts, 'every other client gets a 503, none time out')
+
+  // No busy loop at the limit: uSockets retries a failing accept() forever
+  const before = cpuSeconds(pid)
+  await wait(2000)
+  const cpu = (cpuSeconds(pid) - before) / 2
+  assert.ok(cpu < 0.2, `tracker idle at the limit (${Math.round(cpu * 100)}% CPU)`)
+
+  // Still serving once clients leave
+  open.forEach((s) => s.terminate())
+  await wait(200)
+  const s = await connect(`ws://127.0.0.1:${port}`)
+  s.json({ action: 'scrape', info_hash: INFO_HASH })
+  await s.next((m) => m.action === 'scrape')
+  s.close()
+})
+
+test('the soft open file limit is raised to the hard limit', async () => {
+  const port = PORT + 7
+  const hard = await new Promise((resolve) => execFile('sh', ['-c', 'ulimit -Hn'], (err, out) => resolve(err ? null : out.trim())))
+  await startTracker(port, [], '-Sn 128')
+  const { config } = await metricsOf(port)
+  assert.strictEqual(String(config.fileLimit), hard)
 })
 
 // Multiple peer IDs per connection and BEP 21 suites (contributed in #27)

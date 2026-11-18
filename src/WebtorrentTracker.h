@@ -47,6 +47,9 @@ struct ServerOptions {
 	// Worker threads handling connections (0 = one per CPU core)
 	unsigned int threads = 0;
 
+	// Maximum simultaneous websockets (0 = as many as the open file limit allows)
+	size_t maxConnections = 0;
+
 	// Seconds without data from a client before it is pinged, plus a 16 s
 	// margin (4 or 8 s below 32 s) for the pong before the connection is
 	// closed. Announces come every 2 minutes, slower than proxies drop idle
@@ -91,6 +94,8 @@ private:
 	std::unordered_map<std::string, size_t> connectionsPerAddress;
 
 	std::atomic<uint64_t> nextConnectionId{1};
+	// Set by runServer from the open file limit and maxConnections
+	std::atomic<size_t> connectionLimit{0};
 	Metrics metrics;
 	FailureSamples failureSamples;
 
@@ -175,10 +180,14 @@ private:
 	template <bool SSL>
 	void runServer() {
 		const unsigned int threads = this->threadCount();
+		// Before the event loops open their own descriptors
+		const size_t fileLimit = Utils::raiseFileLimit();
+
 		this->metrics.init(threads);
 		this->metrics.acceptorTid = Metrics::currentTid();
 		this->metrics.config = {
 			{"threads", threads},
+			{"fileLimit", fileLimit},
 			{"idleTimeout", this->options.idleTimeout},
 			{"announceInterval", this->options.tracker.announceInterval},
 			{"announceJitterPercent", this->options.tracker.announceIntervalJitter * 100},
@@ -253,6 +262,10 @@ private:
 			std::_Exit(1);
 		}
 
+		// Every loop is up and holds its descriptors (epoll, eventfd, timers):
+		// connections get what is left. No connection is handed out before this.
+		this->setConnectionLimit(fileLimit);
+
 		for (App<SSL>* app : apps) {
 			acceptor->addChildApp(app);
 		}
@@ -279,7 +292,7 @@ private:
 		}, Metrics::SAMPLE_PERIOD_MS, Metrics::SAMPLE_PERIOD_MS);
 		this->sampleMetrics();
 
-		COUT("Listening on " << (SSL ? "wss://" : "ws://") << this->getAddress() << " with " << threads << " worker thread" << (threads == 1 ? "" : "s"));
+		COUT("Listening on " << (SSL ? "wss://" : "ws://") << this->getAddress() << " with " << threads << " worker thread" << (threads == 1 ? "" : "s") << ", up to " << this->connectionLimit.load() << " connections");
 		acceptor->run();
 
 		us_timer_close(metricsTimer);
@@ -325,10 +338,7 @@ private:
 				torrents = this->tracker->getSwarms().size();
 				peersCount = this->tracker->getMembershipCount();
 			}
-			int64_t websockets = 0;
-			for (size_t i = 0; i < this->metrics.threadCount; i++) {
-				websockets += this->metrics.workers[i].websockets.load(std::memory_order_relaxed);
-			}
+			int64_t websockets = this->openConnections();
 			json statsJSON = {
 				{"torrentsCount", torrents},
 				{"peersCount", peersCount},
@@ -467,6 +477,18 @@ private:
 
 	template <bool SSL>
 	void onUpgrade(uWS::HttpResponse<SSL>* res, uWS::HttpRequest* req, struct us_socket_context_t* context) {
+		// Refused before running out of file descriptors (see connectionsForFileLimit).
+		// Open connections are counted in onOpen, which upgrade() calls before
+		// returning, so each other worker can be between this check and its
+		// count: up to threads - 1 over the limit, well within the headroom.
+		if ((size_t) std::max<int64_t>(0, this->openConnections()) >= this->connectionLimit.load(std::memory_order_relaxed)) {
+			WorkerCounters::add(localCounters->refused);
+			res->writeStatus("503 Service Unavailable");
+			res->writeHeader("Retry-After", "60");
+			res->end("Too many connections");
+			return;
+		}
+
 		PeerContext peer;
 		peer.address = this->getClientAddress(res, req);
 
@@ -621,6 +643,29 @@ private:
 			}
 		});
 		peer->socket = nullptr;
+	}
+
+	void setConnectionLimit(size_t fileLimit) {
+		size_t inUse = Utils::openFileCount();
+		size_t limit = Utils::connectionsForFileLimit(fileLimit, inUse);
+		if (this->options.maxConnections > limit) {
+			EOUT("Warning: --max-connections " << this->options.maxConnections << " doesn't fit in the open file limit (" << fileLimit << "), using " << limit);
+		} else if (this->options.maxConnections > 0) {
+			limit = this->options.maxConnections;
+		} else if (fileLimit < 65536) {
+			EOUT("Warning: the open file limit (" << fileLimit << ") allows only " << limit << " connections. "
+				"Raise it with ulimit -n, LimitNOFILE= (systemd) or --ulimit nofile= (Docker)");
+		}
+		this->connectionLimit.store(limit, std::memory_order_relaxed);
+		this->metrics.config["maxConnections"] = limit;
+	}
+
+	int64_t openConnections() const {
+		int64_t total = 0;
+		for (size_t i = 0; i < this->metrics.threadCount; i++) {
+			total += this->metrics.workers[i].websockets.load(std::memory_order_relaxed);
+		}
+		return total;
 	}
 
 	// Runs on the acceptor thread every Metrics::SAMPLE_PERIOD_MS

@@ -1107,6 +1107,19 @@ static void testStrictProtocol() {
 	CHECK(failureOf(tracker, answerMessage(IH1, peerId('a'), "short", "s"), &a.ctx) == "answer_to_peer_id");
 }
 
+static void testConnectionsForFileLimit() {
+	// Headroom is 1/32 of the limit, at least 64 and at most 16384 descriptors
+	CHECK(Utils::connectionsForFileLimit(1024) == 960);
+	CHECK(Utils::connectionsForFileLimit(524288) == 524288 - 16384);
+	CHECK(Utils::connectionsForFileLimit(1048576) == 1048576 - 16384);
+	// Descriptors already open (event loops, listen socket) come off the top
+	CHECK(Utils::connectionsForFileLimit(1024, 100) == 860);
+	CHECK(Utils::connectionsForFileLimit(100, 50) == 0);
+	CHECK(Utils::connectionsForFileLimit(0) == 0);
+	// The process itself has stdin, stdout and stderr at least
+	CHECK(Utils::openFileCount() >= 3);
+}
+
 #define RUN(t) do { if (std::getenv("OWT_TEST_VERBOSE")) std::cerr << #t << std::endl; t(); } while (0)
 
 int main() {
@@ -1138,6 +1151,7 @@ int main() {
 	RUN(testIsLoopback);
 	RUN(testAnswerIsAnAnnounce);
 	RUN(testStrictProtocol);
+	RUN(testConnectionsForFileLimit);
 
 	if (failures) {
 		std::cerr << failures << " check(s) failed" << std::endl;

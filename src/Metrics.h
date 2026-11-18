@@ -43,6 +43,8 @@ struct alignas(64) WorkerCounters {
 	std::atomic<uint64_t> failureReasons[FAILURE_REASON_COUNT]{};
 	// Connections closed for exceeding --rate-limit / sending invalid JSON
 	std::atomic<uint64_t> rateLimited{0};
+	// Upgrades refused because the tracker is at its connection limit
+	std::atomic<uint64_t> refused{0};
 	std::atomic<uint64_t> invalid{0};
 	// Time spent waiting for / holding the shared tracker lock
 	std::atomic<uint64_t> lockWaitNs{0};
@@ -72,7 +74,7 @@ struct MetricsSample {
 	// Cumulative counters (all workers)
 	uint64_t opened = 0, closed = 0;
 	uint64_t messagesIn = 0, bytesIn = 0, messagesOut = 0, bytesOut = 0, crossThreadOut = 0;
-	uint64_t announces = 0, answers = 0, scrapes = 0, failures = 0, rateLimited = 0, invalid = 0;
+	uint64_t announces = 0, answers = 0, scrapes = 0, failures = 0, rateLimited = 0, refused = 0, invalid = 0;
 	uint64_t lockWaitNs = 0, lockHeldNs = 0;
 	std::array<uint64_t, FAILURE_REASON_COUNT> failureReasons{};
 
@@ -149,6 +151,7 @@ public:
 				sample.failureReasons[f] += r(w.failureReasons[f]);
 			}
 			sample.rateLimited += r(w.rateLimited);
+			sample.refused += r(w.refused);
 			sample.invalid += r(w.invalid);
 			sample.lockWaitNs += r(w.lockWaitNs);
 			sample.lockHeldNs += r(w.lockHeldNs);
@@ -211,7 +214,7 @@ public:
 		json out = {{"range", range}, {"threads", this->threadCount}};
 		const char* gauges[] = {"t", "websockets", "peers", "memberships", "torrents", "seeders", "leechers", "rssMB"};
 		const char* rates[] = {"messagesIn", "messagesOut", "bytesIn", "bytesOut", "opened", "closed",
-			"announces", "answers", "scrapes", "failures", "rateLimited", "invalid"};
+			"announces", "answers", "scrapes", "failures", "rateLimited", "refused", "invalid"};
 		for (const char* key : gauges) out[key] = json::array();
 		for (const char* key : rates) out[key] = json::array();
 		out["cpu"] = json::array();
@@ -244,6 +247,7 @@ public:
 			out["scrapes"].push_back(rate(a.scrapes, b.scrapes));
 			out["failures"].push_back(rate(a.failures, b.failures));
 			out["rateLimited"].push_back(rate(a.rateLimited, b.rateLimited));
+			out["refused"].push_back(rate(a.refused, b.refused));
 			out["invalid"].push_back(rate(a.invalid, b.invalid));
 			out["cpu"].push_back(cpuPercent(a.processTicks, b.processTicks, seconds));
 			json perThread = json::array();
@@ -367,6 +371,7 @@ private:
 				{"scrapes", rate(a.scrapes, b.scrapes)},
 				{"failures", rate(a.failures, b.failures)},
 				{"rateLimited", rate(a.rateLimited, b.rateLimited)},
+				{"refused", rate(a.refused, b.refused)},
 				{"invalid", rate(a.invalid, b.invalid)}
 			}},
 			{"failureReasons", failureReasons},
@@ -378,7 +383,7 @@ private:
 				{"opened", b.opened}, {"closed", b.closed},
 				{"messagesIn", b.messagesIn}, {"messagesOut", b.messagesOut},
 				{"announces", b.announces}, {"answers", b.answers}, {"scrapes", b.scrapes},
-				{"failures", b.failures}, {"rateLimited", b.rateLimited}, {"invalid", b.invalid}
+				{"failures", b.failures}, {"rateLimited", b.rateLimited}, {"refused", b.refused}, {"invalid", b.invalid}
 			}}
 		};
 	}

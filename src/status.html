@@ -267,8 +267,8 @@ footer code { font-size: 12px; }
       series: [{ key: 'lockWaitPct', label: 'Waiting' }, { key: 'lockHeldPct', label: 'Holding' }], fmt: pct },
     { id: 'churn', title: 'Connection churn', desc: 'Connections opened and closed per second. A spike in closes with a drop in connections is a mass disconnect.',
       series: [{ key: 'opened', label: 'Opened' }, { key: 'closed', label: 'Closed' }], fmt: perSec },
-    { id: 'abuse', title: 'Rejected traffic', desc: 'Connections closed for exceeding the rate limit or sending invalid JSON, and protocol errors sent back (broken down by reason below).',
-      series: [{ key: 'rateLimited', label: 'Rate limited' }, { key: 'invalid', label: 'Invalid JSON' }, { key: 'failures', label: 'Protocol errors' }], fmt: perSec },
+    { id: 'abuse', title: 'Rejected traffic', desc: 'Connections closed for exceeding the rate limit or sending invalid JSON, connections refused at the connection limit, and protocol errors sent back (broken down by reason below).',
+      series: [{ key: 'rateLimited', label: 'Rate limited' }, { key: 'refused', label: 'Refused (full)' }, { key: 'invalid', label: 'Invalid JSON' }, { key: 'failures', label: 'Protocol errors' }], fmt: perSec },
     { id: 'bw', title: 'Bandwidth', desc: 'WebSocket payload bytes per second (before Cloudflare).',
       series: [{ key: 'bytesIn', label: 'In' }, { key: 'bytesOut', label: 'Out' }], fmt: (n) => bytes(n, '/s') },
     { id: 'mem', title: 'Memory', desc: 'Resident memory of the tracker process.',
@@ -463,6 +463,14 @@ footer code { font-size: 12px; }
     }
     checks.push({ what: 'Connections stable', why: 'A fall of more than 30% in 5 minutes usually means the tracker or Cloudflare dropped clients.',
       val: drop > 0.5 ? '−' + pct(drop) + ' in 5 min' : compact(cur.websockets) + ' open', level: drop >= 50 ? 'critical' : drop >= 30 ? 'serious' : 'good' });
+
+    const max = cur.config && cur.config.maxConnections;
+    if (max) {
+      const used = cur.websockets / max * 100;
+      const refused = (cur.rates && cur.rates.refused) || 0;
+      checks.push({ what: 'Connection limit', why: `Open connections out of the ${compact(max)} the tracker accepts (open file limit ${compact(cur.config.fileLimit)}). New clients get 503 at the limit: raise the file limit (LimitNOFILE, docker --ulimit nofile).`,
+        val: pct(used) + (refused > 0 ? ' · ' + perSec(refused) + ' refused' : ''), level: refused > 0 || used >= 95 ? 'critical' : used >= 85 ? 'serious' : used >= 70 ? 'warning' : 'good' });
+    }
 
     const mem = cur.rssBytes || 0;
     checks.push({ what: 'Memory', why: 'Resident memory grows with connections (~1.5 KB each). Steady growth at a flat connection count points to a leak.',
